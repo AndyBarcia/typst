@@ -31,15 +31,20 @@
 // Test rvalue missing key.
 #{
   let dict = (a: 1, b: 2)
-  // Error: 11-23 dictionary does not contain key "c"
+  // Error: 11-23 dictionary does not contain key "c" and no default value was specified
   let x = dict.at("c")
 }
+
+---
+// Test default value.
+#test((a: 1, b: 2).at("b", default: 3), 2)
+#test((a: 1, b: 2).at("c", default: 3), 3)
 
 ---
 // Missing lvalue is not automatically none-initialized.
 #{
   let dict = (:)
-  // Error: 3-9 dictionary does not contain key "b"
+  // Error: 3-9 dictionary does not contain key "b" and no default value was specified
   dict.b += 1
 }
 
@@ -48,19 +53,25 @@
 #let dict = (a: 3, c: 2, b: 1)
 #test("c" in dict, true)
 #test(dict.len(), 3)
-#test(dict.values(), (3, 1, 2))
-#test(dict.pairs().map(p => p.first() + str(p.last())).join(), "a3b1c2")
+#test(dict.values(), (3, 2, 1))
+#test(dict.pairs().map(p => p.first() + str(p.last())).join(), "a3c2b1")
 
 #dict.remove("c")
 #test("c" in dict, false)
 #test(dict, (a: 3, b: 1))
 
 ---
-// Error: 24-29 duplicate key
+// Test that removal keeps order.
+#let dict = (a: 1, b: 2, c: 3, d: 4)
+#dict.remove("b")
+#test(dict.keys(), ("a", "c", "d"))
+
+---
+// Error: 24-29 duplicate key: first
 #(first: 1, second: 2, first: 3)
 
 ---
-// Error: 17-20 duplicate key
+// Error: 17-20 duplicate key: a
 #(a: 1, "b": 2, "a": 3)
 
 ---

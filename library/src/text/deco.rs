@@ -4,9 +4,9 @@ use ttf_parser::{GlyphId, OutlineBuilder};
 use super::TextElem;
 use crate::prelude::*;
 
-/// Underline text.
+/// Underlines text.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// This is #underline[important].
 /// ```
@@ -15,8 +15,11 @@ use crate::prelude::*;
 /// Category: text
 #[element(Show)]
 pub struct UnderlineElem {
-    /// How to stroke the line. The text color and thickness are read from the
-    /// font tables if `{auto}`.
+    /// How to stroke the line.
+    ///
+    /// See the [line's documentation]($func/line.stroke) for more details. If
+    /// set to `{auto}`, takes on the text's color and a thickness defined in
+    /// the current font.
     ///
     /// ```example
     /// Take #underline(
@@ -29,8 +32,8 @@ pub struct UnderlineElem {
     #[fold]
     pub stroke: Smart<PartialStroke>,
 
-    /// Position of the line relative to the baseline, read from the font tables
-    /// if `{auto}`.
+    /// The position of the line relative to the baseline, read from the font
+    /// tables if `{auto}`.
     ///
     /// ```example
     /// #underline(offset: 5pt)[
@@ -40,7 +43,8 @@ pub struct UnderlineElem {
     #[resolve]
     pub offset: Smart<Length>,
 
-    /// Amount that the line will be longer or shorter than its associated text.
+    /// The amount by which to extend the line beyond (or within if negative)
+    /// the content.
     ///
     /// ```example
     /// #align(center,
@@ -66,6 +70,7 @@ pub struct UnderlineElem {
 }
 
 impl Show for UnderlineElem {
+    #[tracing::instrument(name = "UnderlineElem::show", skip_all)]
     fn show(&self, _: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
         Ok(self.body().styled(TextElem::set_deco(Decoration {
             line: DecoLine::Underline,
@@ -77,9 +82,9 @@ impl Show for UnderlineElem {
     }
 }
 
-/// Add a line over text.
+/// Adds a line over text.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #overline[A line over text.]
 /// ```
@@ -88,8 +93,11 @@ impl Show for UnderlineElem {
 /// Category: text
 #[element(Show)]
 pub struct OverlineElem {
-    /// How to stroke the line. The text color and thickness are read from the
-    /// font tables if `{auto}`.
+    /// How to stroke the line.
+    ///
+    /// See the [line's documentation]($func/line.stroke) for more details. If
+    /// set to `{auto}`, takes on the text's color and a thickness defined in
+    /// the current font.
     ///
     /// ```example
     /// #set text(fill: olive)
@@ -103,8 +111,8 @@ pub struct OverlineElem {
     #[fold]
     pub stroke: Smart<PartialStroke>,
 
-    /// Position of the line relative to the baseline, read from the font tables
-    /// if `{auto}`.
+    /// The position of the line relative to the baseline. Read from the font
+    /// tables if `{auto}`.
     ///
     /// ```example
     /// #overline(offset: -1.2em)[
@@ -114,7 +122,8 @@ pub struct OverlineElem {
     #[resolve]
     pub offset: Smart<Length>,
 
-    /// Amount that the line will be longer or shorter than its associated text.
+    /// The amount by which to extend the line beyond (or within if negative)
+    /// the content.
     ///
     /// ```example
     /// #set overline(extent: 4pt)
@@ -145,6 +154,7 @@ pub struct OverlineElem {
 }
 
 impl Show for OverlineElem {
+    #[tracing::instrument(name = "OverlineElem::show", skip_all)]
     fn show(&self, _: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
         Ok(self.body().styled(TextElem::set_deco(Decoration {
             line: DecoLine::Overline,
@@ -156,9 +166,9 @@ impl Show for OverlineElem {
     }
 }
 
-/// Strike through text.
+/// Strikes through text.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// This is #strike[not] relevant.
 /// ```
@@ -167,8 +177,11 @@ impl Show for OverlineElem {
 /// Category: text
 #[element(Show)]
 pub struct StrikeElem {
-    /// How to stroke the line. The text color and thickness are read from the
-    /// font tables if `{auto}`.
+    /// How to stroke the line.
+    ///
+    /// See the [line's documentation]($func/line.stroke) for more details. If
+    /// set to `{auto}`, takes on the text's color and a thickness defined in
+    /// the current font.
     ///
     /// _Note:_ Please don't use this for real redaction as you can still
     /// copy paste the text.
@@ -181,8 +194,8 @@ pub struct StrikeElem {
     #[fold]
     pub stroke: Smart<PartialStroke>,
 
-    /// Position of the line relative to the baseline, read from the font tables
-    /// if `{auto}`.
+    /// The position of the line relative to the baseline. Read from the font
+    /// tables if `{auto}`.
     ///
     /// This is useful if you are unhappy with the offset your font provides.
     ///
@@ -194,7 +207,8 @@ pub struct StrikeElem {
     #[resolve]
     pub offset: Smart<Length>,
 
-    /// Amount that the line will be longer or shorter than its associated text.
+    /// The amount by which to extend the line beyond (or within if negative)
+    /// the content.
     ///
     /// ```example
     /// This #strike(extent: -2pt)[skips] parts of the word.
@@ -209,6 +223,7 @@ pub struct StrikeElem {
 }
 
 impl Show for StrikeElem {
+    #[tracing::instrument(name = "StrikeElem::show", skip_all)]
     fn show(&self, _: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
         Ok(self.body().styled(TextElem::set_deco(Decoration {
             line: DecoLine::Strikethrough,
@@ -239,8 +254,8 @@ impl Fold for Decoration {
     }
 }
 
-cast_from_value! {
-    Decoration: "decoration",
+cast! {
+    type Decoration: "decoration",
 }
 
 /// A kind of decorative line.
@@ -268,9 +283,10 @@ pub(super) fn decorate(
     };
 
     let offset = deco.offset.unwrap_or(-metrics.position.at(text.size)) - shift;
-    let stroke = deco.stroke.unwrap_or(Stroke {
-        paint: text.fill,
+    let stroke = deco.stroke.clone().unwrap_or(Stroke {
+        paint: text.fill.clone(),
         thickness: metrics.thickness.at(text.size),
+        ..Stroke::default()
     });
 
     let gap_padding = 0.08 * text.size;
@@ -284,7 +300,7 @@ pub(super) fn decorate(
         let target = Point::new(to - from, Abs::zero());
 
         if target.x >= min_width || !deco.evade {
-            let shape = Geometry::Line(target).stroked(stroke);
+            let shape = Geometry::Line(target).stroked(stroke.clone());
             frame.push(origin, FrameItem::Shape(shape, Span::detached()));
         }
     };
@@ -314,11 +330,13 @@ pub(super) fn decorate(
 
         // Only do the costly segments intersection test if the line
         // intersects the bounding box.
-        if bbox.map_or(false, |bbox| {
+        let intersect = bbox.map_or(false, |bbox| {
             let y_min = -text.font.to_em(bbox.y_max).at(text.size);
             let y_max = -text.font.to_em(bbox.y_min).at(text.size);
             offset >= y_min && offset <= y_max
-        }) {
+        });
+
+        if intersect {
             // Find all intersections of segments with the line.
             intersections.extend(
                 path.segments()

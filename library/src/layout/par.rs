@@ -1,26 +1,36 @@
+use icu_properties::{maps::CodePointMapData, LineBreak};
+use icu_provider::AsDeserializingBufferProvider;
+use icu_provider_adapters::fork::ForkByKeyProvider;
+use icu_provider_blob::BlobDataProvider;
+use icu_segmenter::{LineBreakIteratorUtf8, LineSegmenter};
+use once_cell::sync::Lazy;
 use typst::eval::Tracer;
+use typst::model::DelayedErrors;
 use unicode_bidi::{BidiInfo, Level as BidiLevel};
 use unicode_script::{Script, UnicodeScript};
-use xi_unicode::LineBreakIterator;
 
 use super::{BoxElem, HElem, Sizing, Spacing};
 use crate::layout::AlignElem;
 use crate::math::EquationElem;
 use crate::prelude::*;
 use crate::text::{
-    shape, LinebreakElem, Quoter, Quotes, ShapedText, SmartQuoteElem, SpaceElem, TextElem,
+    is_gb_style, shape, LinebreakElem, Quoter, Quotes, ShapedText, SmartQuoteElem,
+    SpaceElem, TextElem,
 };
 
-/// Arrange text, spacing and inline-level elements into a paragraph.
+/// Arranges text, spacing and inline-level elements into a paragraph.
 ///
 /// Although this function is primarily used in set rules to affect paragraph
 /// properties, it can also be used to explicitly render its argument onto a
 /// paragraph of its own.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
-/// #set par(first-line-indent: 1em, justify: true)
 /// #show par: set block(spacing: 0.65em)
+/// #set par(
+///   first-line-indent: 1em,
+///   justify: true,
+/// )
 ///
 /// We proceed by contradiction.
 /// Suppose that there exists a set
@@ -39,8 +49,6 @@ use crate::text::{
 #[element(Construct)]
 pub struct ParElem {
     /// The spacing between lines.
-    ///
-    /// The default value is `{0.65em}`.
     #[resolve]
     #[default(Em::new(0.65).into())]
     pub leading: Length,
@@ -83,15 +91,16 @@ pub struct ParElem {
     #[default]
     pub linebreaks: Smart<Linebreaks>,
 
-    /// The indent the first line of a consecutive paragraph should have.
+    /// The indent the first line of a paragraph should have.
     ///
-    /// The first paragraph on a page will never be indented.
+    /// Only the first line of a consecutive paragraph will be indented (not
+    /// the first one in a block or on the page).
     ///
-    /// By typographic convention, paragraph breaks are indicated by either some
-    /// space between paragraphs or indented first lines. Consider turning the
-    /// [paragraph spacing]($func/block.spacing) off when using this property
-    /// (e.g. using `[#show par: set block(spacing: 0pt)]`).
-    #[resolve]
+    /// By typographic convention, paragraph breaks are indicated either by some
+    /// space between paragraphs or by indented first lines. Consider reducing
+    /// the [paragraph spacing]($func/block.spacing) to the [`leading`] when
+    /// using this property (e.g. using
+    /// `[#show par: set block(spacing: 0.65em)]`).
     pub first_line_indent: Length,
 
     /// The indent all but the first line of a paragraph should have.
@@ -100,6 +109,7 @@ pub struct ParElem {
 
     /// The contents of the paragraph.
     #[external]
+    #[required]
     pub body: Content,
 
     /// The paragraph's children.
@@ -125,6 +135,7 @@ impl Construct for ParElem {
 
 impl ParElem {
     /// Layout the paragraph into a collection of lines.
+    #[tracing::instrument(name = "ParElement::layout", skip_all)]
     pub fn layout(
         &self,
         vt: &mut Vt,
@@ -134,18 +145,27 @@ impl ParElem {
         expand: bool,
     ) -> SourceResult<Fragment> {
         #[comemo::memoize]
+        #[allow(clippy::too_many_arguments)]
         fn cached(
             par: &ParElem,
-            world: Tracked<dyn World>,
-            tracer: TrackedMut<Tracer>,
-            provider: TrackedMut<StabilityProvider>,
+            world: Tracked<dyn World + '_>,
             introspector: Tracked<Introspector>,
+            locator: Tracked<Locator>,
+            delayed: TrackedMut<DelayedErrors>,
+            tracer: TrackedMut<Tracer>,
             styles: StyleChain,
             consecutive: bool,
             region: Size,
             expand: bool,
         ) -> SourceResult<Fragment> {
-            let mut vt = Vt { world, tracer, provider, introspector };
+            let mut locator = Locator::chained(locator);
+            let mut vt = Vt {
+                world,
+                introspector,
+                locator: &mut locator,
+                delayed,
+                tracer,
+            };
             let children = par.children();
 
             // Collect all text into one string for BiDi analysis.
@@ -163,17 +183,21 @@ impl ParElem {
             finalize(&mut vt, &p, &lines, region, expand)
         }
 
-        cached(
+        let fragment = cached(
             self,
             vt.world,
-            TrackedMut::reborrow_mut(&mut vt.tracer),
-            TrackedMut::reborrow_mut(&mut vt.provider),
             vt.introspector,
+            vt.locator.track(),
+            TrackedMut::reborrow_mut(&mut vt.delayed),
+            TrackedMut::reborrow_mut(&mut vt.tracer),
             styles,
             consecutive,
             region,
             expand,
-        )
+        )?;
+
+        vt.locator.visit_frames(&fragment);
+        Ok(fragment)
     }
 }
 
@@ -195,7 +219,7 @@ pub enum Linebreaks {
 /// [for loops]($scripting/#loops). Multiple consecutive
 /// paragraph breaks collapse into a single one.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #for i in range(3) {
 ///   [Blind text #i: ]
@@ -204,7 +228,7 @@ pub enum Linebreaks {
 /// }
 /// ```
 ///
-/// ## Syntax
+/// ## Syntax { #syntax }
 /// Instead of calling this function, you can insert a blank line into your
 /// markup to create a paragraph break.
 ///
@@ -317,7 +341,8 @@ impl Segment<'_> {
             Self::Text(len) => len,
             Self::Spacing(_) => SPACING_REPLACE.len_utf8(),
             Self::Box(_, true) => SPACING_REPLACE.len_utf8(),
-            Self::Equation(_) | Self::Box(_, _) | Self::Meta => OBJ_REPLACE.len_utf8(),
+            Self::Equation(_) | Self::Box(_, _) => OBJ_REPLACE.len_utf8(),
+            Self::Meta => 0,
         }
     }
 }
@@ -333,11 +358,20 @@ enum Item<'a> {
     Fractional(Fr, Option<(&'a BoxElem, StyleChain<'a>)>),
     /// Layouted inline-level content.
     Frame(Frame),
+    /// Metadata.
+    Meta(Frame),
 }
 
 impl<'a> Item<'a> {
     /// If this a text item, return it.
     fn text(&self) -> Option<&ShapedText<'a>> {
+        match self {
+            Self::Text(shaped) => Some(shaped),
+            _ => None,
+        }
+    }
+
+    fn text_mut(&mut self) -> Option<&mut ShapedText<'a>> {
         match self {
             Self::Text(shaped) => Some(shaped),
             _ => None,
@@ -350,6 +384,7 @@ impl<'a> Item<'a> {
             Self::Text(shaped) => shaped.text.len(),
             Self::Absolute(_) | Self::Fractional(_, _) => SPACING_REPLACE.len_utf8(),
             Self::Frame(_) => OBJ_REPLACE.len_utf8(),
+            Self::Meta(_) => 0,
         }
     }
 
@@ -359,18 +394,19 @@ impl<'a> Item<'a> {
             Self::Text(shaped) => shaped.width,
             Self::Absolute(v) => *v,
             Self::Frame(frame) => frame.width(),
-            Self::Fractional(_, _) => Abs::zero(),
+            Self::Fractional(_, _) | Self::Meta(_) => Abs::zero(),
         }
     }
 }
 
 /// Maps byte offsets back to spans.
+#[derive(Default)]
 pub struct SpanMapper(Vec<(usize, Span)>);
 
 impl SpanMapper {
     /// Create a new span mapper.
     pub fn new() -> Self {
-        Self(vec![])
+        Self::default()
     }
 
     /// Push a span for a segment with the given length.
@@ -455,22 +491,35 @@ impl<'a> Line<'a> {
         self.items().skip(start).take(end - start)
     }
 
-    /// How many justifiable glyphs the line contains.
+    /// How many glyphs are in the text where we can insert additional
+    /// space when encountering underfull lines.
     fn justifiables(&self) -> usize {
         let mut count = 0;
         for shaped in self.items().filter_map(Item::text) {
             count += shaped.justifiables();
         }
+        // CJK character at line end should not be adjusted.
+        if self
+            .items()
+            .last()
+            .and_then(Item::text)
+            .map(|s| s.cjk_justifiable_at_last())
+            .unwrap_or(false)
+        {
+            count -= 1;
+        }
+
         count
     }
 
-    /// How much of the line is stretchable spaces.
-    fn stretch(&self) -> Abs {
-        let mut stretch = Abs::zero();
-        for shaped in self.items().filter_map(Item::text) {
-            stretch += shaped.stretch();
-        }
-        stretch
+    /// How much can the line stretch
+    fn stretchability(&self) -> Abs {
+        self.items().filter_map(Item::text).map(|s| s.stretchability()).sum()
+    }
+
+    /// How much can the line shrink
+    fn shrinkability(&self) -> Abs {
+        self.items().filter_map(Item::text).map(|s| s.shrinkability()).sum()
     }
 
     /// The sum of fractions in the line.
@@ -486,6 +535,7 @@ impl<'a> Line<'a> {
 
 /// Collect all text of the paragraph into one string. This also performs
 /// string-level preprocessing like case transformations.
+#[allow(clippy::type_complexity)]
 fn collect<'a>(
     children: &'a [Content],
     styles: &'a StyleChain<'a>,
@@ -497,27 +547,14 @@ fn collect<'a>(
     let mut spans = SpanMapper::new();
     let mut iter = children.iter().peekable();
 
-    if consecutive {
-        let first_line_indent = ParElem::first_line_indent_in(*styles);
-        if !first_line_indent.is_zero()
-            && children
-                .iter()
-                .find_map(|child| {
-                    if child.with::<dyn Behave>().map_or(false, |behaved| {
-                        behaved.behaviour() == Behaviour::Ignorant
-                    }) {
-                        None
-                    } else if child.is::<TextElem>() || child.is::<SmartQuoteElem>() {
-                        Some(true)
-                    } else {
-                        Some(false)
-                    }
-                })
-                .unwrap_or_default()
-        {
-            full.push(SPACING_REPLACE);
-            segments.push((Segment::Spacing(first_line_indent.into()), *styles));
-        }
+    let first_line_indent = ParElem::first_line_indent_in(*styles);
+    if !first_line_indent.is_zero()
+        && consecutive
+        && AlignElem::alignment_in(*styles).x.resolve(*styles)
+            == TextElem::dir_in(*styles).start().into()
+    {
+        full.push(SPACING_REPLACE);
+        segments.push((Segment::Spacing(first_line_indent.into()), *styles));
     }
 
     let hang = ParElem::hanging_indent_in(*styles);
@@ -546,6 +583,10 @@ fn collect<'a>(
             }
             Segment::Text(full.len() - prev)
         } else if let Some(elem) = child.to::<HElem>() {
+            if elem.amount().is_zero() {
+                continue;
+            }
+
             full.push(SPACING_REPLACE);
             Segment::Spacing(elem.amount())
         } else if let Some(elem) = child.to::<LinebreakElem>() {
@@ -559,11 +600,19 @@ fn collect<'a>(
                 let region = TextElem::region_in(styles);
                 let quotes = Quotes::from_lang(lang, region);
                 let peeked = iter.peek().and_then(|child| {
+                    let child = if let Some((child, _)) = child.to_styled() {
+                        child
+                    } else {
+                        child
+                    };
                     if let Some(elem) = child.to::<TextElem>() {
                         elem.text().chars().next()
                     } else if child.is::<SmartQuoteElem>() {
                         Some('"')
-                    } else if child.is::<SpaceElem>() || child.is::<HElem>() {
+                    } else if child.is::<SpaceElem>()
+                        || child.is::<HElem>()
+                        || child.is::<LinebreakElem>()
+                    {
                         Some(SPACING_REPLACE)
                     } else {
                         Some(OBJ_REPLACE)
@@ -583,7 +632,6 @@ fn collect<'a>(
             full.push(if frac { SPACING_REPLACE } else { OBJ_REPLACE });
             Segment::Box(elem, frac)
         } else if child.is::<MetaElem>() {
-            full.push(OBJ_REPLACE);
             Segment::Meta
         } else {
             bail!(child.span(), "unexpected paragraph child");
@@ -668,7 +716,7 @@ fn prepare<'a>(
             Segment::Meta => {
                 let mut frame = Frame::new(Size::zero());
                 frame.meta(styles, true);
-                items.push(Item::Frame(frame));
+                items.push(Item::Meta(frame));
             }
         }
 
@@ -698,9 +746,12 @@ fn shape_range<'a>(
     spans: &SpanMapper,
     styles: StyleChain<'a>,
 ) {
+    let lang = TextElem::lang_in(styles);
+    let region = TextElem::region_in(styles);
     let mut process = |range: Range, level: BidiLevel| {
         let dir = if level.is_ltr() { Dir::LTR } else { Dir::RTL };
-        let shaped = shape(vt, range.start, &bidi.text[range], spans, styles, dir);
+        let shaped =
+            shape(vt, range.start, &bidi.text[range], spans, styles, dir, lang, region);
         items.push(Item::Text(shaped));
     };
 
@@ -709,7 +760,7 @@ fn shape_range<'a>(
     let mut cursor = range.start;
 
     // Group by embedding level and script.
-    for i in cursor..range.end {
+    for i in range.clone() {
         if !bidi.text.is_char_boundary(i) {
             continue;
         }
@@ -745,8 +796,8 @@ fn is_compatible(a: Script, b: Script) -> bool {
 
 /// Get a style property, but only if it is the same for all children of the
 /// paragraph.
-fn shared_get<'a, T: PartialEq>(
-    styles: StyleChain<'a>,
+fn shared_get<T: PartialEq>(
+    styles: StyleChain<'_>,
     children: &[Content],
     getter: fn(StyleChain) -> T,
 ) -> Option<T> {
@@ -754,8 +805,8 @@ fn shared_get<'a, T: PartialEq>(
     children
         .iter()
         .filter_map(|child| child.to_styled())
-        .all(|(_, local)| getter(styles.chain(&local)) == value)
-        .then(|| value)
+        .all(|(_, local)| getter(styles.chain(local)) == value)
+        .then_some(value)
 }
 
 /// Find suitable linebreaks.
@@ -846,10 +897,9 @@ fn linebreak_optimized<'a>(vt: &Vt, p: &'a Preparation<'a>, width: Abs) -> Vec<L
 
     // Cost parameters.
     const HYPH_COST: Cost = 0.5;
-    const CONSECUTIVE_DASH_COST: Cost = 30.0;
+    const CONSECUTIVE_DASH_COST: Cost = 300.0;
     const MAX_COST: Cost = 1_000_000.0;
-    const MIN_COST: Cost = -MAX_COST;
-    const MIN_RATIO: f64 = -0.15;
+    const MIN_RATIO: f64 = -1.0;
 
     // Dynamic programming table.
     let mut active = 0;
@@ -875,16 +925,29 @@ fn linebreak_optimized<'a>(vt: &Vt, p: &'a Preparation<'a>, width: Abs) -> Vec<L
             // Determine how much the line's spaces would need to be stretched
             // to make it the desired width.
             let delta = width - attempt.width;
-            let mut ratio = delta / attempt.stretch();
-            if ratio.is_infinite() {
-                ratio = delta / (em / 2.0);
+            // Determine how much stretch are permitted.
+            let adjust = if delta >= Abs::zero() {
+                attempt.stretchability()
+            } else {
+                attempt.shrinkability()
+            };
+            // Ideally, the ratio should between -1.0 and 1.0, but sometimes a value above 1.0
+            // is possible, in which case the line is underfull.
+            let mut ratio = delta / adjust;
+            if ratio.is_nan() {
+                // The line is not stretchable, but it just fits.
+                // This often happens with monospace fonts and CJK texts.
+                ratio = 0.0;
+            }
+            if ratio > 1.0 {
+                // We should stretch the line above its stretchability. Now calculate the extra amount.
+                let extra_stretch = (delta - adjust) / attempt.justifiables() as f64;
+                // Normalize the amount by half Em size.
+                ratio = 1.0 + extra_stretch / (em / 2.0);
             }
 
-            // At some point, it doesn't matter any more.
-            ratio = ratio.min(10.0);
-
             // Determine the cost of the line.
-            let min_ratio = if attempt.justify { MIN_RATIO } else { 0.0 };
+            let min_ratio = if p.justify { MIN_RATIO } else { 0.0 };
             let mut cost = if ratio < min_ratio {
                 // The line is overfull. This is the case if
                 // - justification is on, but we'd need to shrink too much
@@ -894,11 +957,17 @@ fn linebreak_optimized<'a>(vt: &Vt, p: &'a Preparation<'a>, width: Abs) -> Vec<L
                 active = i + 1;
                 MAX_COST
             } else if mandatory || eof {
-                // This is a mandatory break and the line is not overfull, so it
-                // has minimum cost. All breakpoints before this one become
-                // inactive since no line can span above the mandatory break.
+                // This is a mandatory break and the line is not overfull, so
+                // all breakpoints before this one become inactive since no line
+                // can span above the mandatory break.
                 active = k;
-                MIN_COST + if attempt.justify { ratio.powi(3).abs() } else { 0.0 }
+                // If ratio > 0, we need to stretch the line only when justify is needed.
+                // If ratio < 0, we always need to shrink the line.
+                if (ratio > 0.0 && attempt.justify) || ratio < 0.0 {
+                    ratio.powi(3).abs()
+                } else {
+                    0.0
+                }
             } else {
                 // Normal line with cost of |ratio^3|.
                 ratio.powi(3).abs()
@@ -908,6 +977,12 @@ fn linebreak_optimized<'a>(vt: &Vt, p: &'a Preparation<'a>, width: Abs) -> Vec<L
             if hyphen {
                 cost += HYPH_COST;
             }
+
+            // In Knuth paper, cost = (1 + 100|r|^3 + p)^2 + a,
+            // where r is the ratio, p=50 is penaty, and a=3000 is consecutive penaty.
+            // We divide the whole formula by 10, resulting (0.01 + |r|^3 + p)^2 + a,
+            // where p=0.5 and a=300
+            cost = (0.01 + cost).powi(2);
 
             // Penalize two consecutive dashes (not necessarily hyphens) extra.
             if attempt.dash && pred.line.dash {
@@ -940,15 +1015,65 @@ fn linebreak_optimized<'a>(vt: &Vt, p: &'a Preparation<'a>, width: Abs) -> Vec<L
     lines
 }
 
+/// Generated by the following command:
+///
+/// ```sh
+/// icu4x-datagen  --locales full --keys-for-bin target/debug/typst \
+///                --format blob --out library/assets/icudata.postcard --overwrite
+/// ```
+///
+/// Install icu4x-datagen with `cargo install icu4x-datagen`.
+static ICU_DATA: &[u8] = include_bytes!("../../assets/icudata.postcard");
+
+/// Generated by the following command:
+///
+/// ```sh
+/// icu4x-datagen --locales zh ja --keys segmenter/line@1 --format blob \
+///               --out library/assets/cj_linebreak_data.postcard --overwrite
+/// ```
+///
+/// The used icu4x-datagen should be patched by
+/// https://github.com/peng1999/icu4x/commit/b9beb6cbf633d61fc3d7983e5baf7f4449fbfae5
+static CJ_LINEBREAK_DATA: &[u8] =
+    include_bytes!("../../assets/cj_linebreak_data.postcard");
+
+/// The general line break segmenter.
+static SEGMENTER: Lazy<LineSegmenter> = Lazy::new(|| {
+    let provider = BlobDataProvider::try_new_from_static_blob(ICU_DATA).unwrap();
+    LineSegmenter::try_new_lstm_with_buffer_provider(&provider).unwrap()
+});
+
+/// The Unicode line break properties for each code point.
+static CJ_SEGMENTER: Lazy<LineSegmenter> = Lazy::new(|| {
+    let provider = BlobDataProvider::try_new_from_static_blob(ICU_DATA).unwrap();
+    let cj_blob = BlobDataProvider::try_new_from_static_blob(CJ_LINEBREAK_DATA).unwrap();
+    let cj_provider = ForkByKeyProvider::new(cj_blob, provider);
+    LineSegmenter::try_new_lstm_with_buffer_provider(&cj_provider).unwrap()
+});
+
+/// The line break segmenter for Chinese/Jpanese text.
+static LINEBREAK_DATA: Lazy<CodePointMapData<LineBreak>> = Lazy::new(|| {
+    let provider = BlobDataProvider::try_new_from_static_blob(ICU_DATA).unwrap();
+    let deser_provider = provider.as_deserializing();
+    icu_properties::maps::load_line_break(&deser_provider).unwrap()
+});
+
 /// Determine all possible points in the text where lines can broken.
 ///
 /// Returns for each breakpoint the text index, whether the break is mandatory
 /// (after `\n`) and whether a hyphen is required (when breaking inside of a
 /// word).
 fn breakpoints<'a>(p: &'a Preparation<'a>) -> Breakpoints<'a> {
+    let mut linebreaks = if matches!(p.lang, Some(Lang::CHINESE | Lang::JAPANESE)) {
+        CJ_SEGMENTER.segment_str(p.bidi.text)
+    } else {
+        SEGMENTER.segment_str(p.bidi.text)
+    };
+    // The iterator always yields a breakpoint at index 0, we want to ignore it
+    linebreaks.next();
     Breakpoints {
         p,
-        linebreaks: LineBreakIterator::new(p.bidi.text),
+        linebreaks,
         syllables: None,
         offset: 0,
         suffix: 0,
@@ -962,7 +1087,7 @@ struct Breakpoints<'a> {
     /// The paragraph's items.
     p: &'a Preparation<'a>,
     /// The inner iterator over the unicode line break opportunities.
-    linebreaks: LineBreakIterator<'a>,
+    linebreaks: LineBreakIteratorUtf8<'a, 'a>,
     /// Iterator over syllables of the current word.
     syllables: Option<hypher::Syllables<'a>>,
     /// The current text offset.
@@ -996,8 +1121,20 @@ impl Iterator for Breakpoints<'_> {
             return Some((self.offset, self.mandatory && !hyphen, hyphen));
         }
 
+        let lb = LINEBREAK_DATA.as_borrowed();
+
         // Get the next "word".
-        (self.end, self.mandatory) = self.linebreaks.next()?;
+        self.end = self.linebreaks.next()?;
+        self.mandatory =
+            self.p.bidi.text[..self.end].chars().next_back().map_or(false, |c| {
+                matches!(
+                    lb.get(c),
+                    LineBreak::MandatoryBreak
+                        | LineBreak::CarriageReturn
+                        | LineBreak::LineFeed
+                        | LineBreak::NextLine
+                ) || self.end == self.p.bidi.text.len()
+            });
 
         // Hyphenate the next word.
         if self.p.hyphenate != Some(false) {
@@ -1079,13 +1216,20 @@ fn line<'a>(
         let base = expanded.end - shaped.text.len();
         let start = range.start.max(base);
         let text = &p.bidi.text[start..range.end];
-        let trimmed = text.trim_end();
+        // U+200B ZERO WIDTH SPACE is used to provide a line break opportunity,
+        // we want to trim it too.
+        let trimmed = text.trim_end().trim_end_matches('\u{200B}');
         range.end = start + trimmed.len();
 
         // Deal with hyphens, dashes and justification.
         let shy = trimmed.ends_with('\u{ad}');
         dash = hyphen || shy || trimmed.ends_with(['-', '–', '—']);
         justify |= text.ends_with('\u{2028}');
+
+        // Deal with CJK punctuation at line ends.
+        let gb_style = is_gb_style(shaped.lang, shaped.region);
+        let end_cjk_punct = trimmed
+            .ends_with(['”', '’', '，', '。', '、', '：', '；', '》', '）', '』', '」']);
 
         // Usually, we don't want to shape an empty string because:
         // - We don't want the height of trimmed whitespace in a different
@@ -1096,12 +1240,20 @@ fn line<'a>(
         // need the shaped empty string to make the line the appropriate
         // height. That is the case exactly if the string is empty and there
         // are no other items in the line.
-        if hyphen || start + shaped.text.len() > range.end {
+        if hyphen || start + shaped.text.len() > range.end || end_cjk_punct {
             if hyphen || start < range.end || before.is_empty() {
-                let shifted = start - base..range.end - base;
-                let mut reshaped = shaped.reshape(vt, &p.spans, shifted);
+                let mut reshaped = shaped.reshape(vt, &p.spans, start..range.end);
                 if hyphen || shy {
                     reshaped.push_hyphen(vt);
+                }
+                let punct = reshaped.glyphs.last();
+                if let Some(punct) = punct {
+                    if punct.is_cjk_left_aligned_punctuation(gb_style) {
+                        let shrink_amount = punct.shrinkability().1;
+                        let punct = reshaped.glyphs.to_mut().last_mut().unwrap();
+                        punct.shrink_right(shrink_amount);
+                        reshaped.width -= shrink_amount.at(reshaped.size);
+                    }
                 }
                 width += reshaped.width;
                 last = Some(Item::Text(reshaped));
@@ -1111,6 +1263,10 @@ fn line<'a>(
         }
     }
 
+    // Deal with CJK punctuation at line starts.
+    let text = &p.bidi.text[range.start..end];
+    let start_cjk_punct = text.starts_with(['“', '‘', '《', '（', '『', '「']);
+
     // Reshape the start item if it's split in half.
     let mut first = None;
     if let Some((Item::Text(shaped), after)) = inner.split_first() {
@@ -1119,15 +1275,30 @@ fn line<'a>(
         let end = range.end.min(base + shaped.text.len());
 
         // Reshape if necessary.
-        if range.start + shaped.text.len() > end {
-            if range.start < end {
-                let shifted = range.start - base..end - base;
-                let reshaped = shaped.reshape(vt, &p.spans, shifted);
+        if range.start + shaped.text.len() > end || start_cjk_punct {
+            if range.start < end || start_cjk_punct {
+                let reshaped = shaped.reshape(vt, &p.spans, range.start..end);
                 width += reshaped.width;
                 first = Some(Item::Text(reshaped));
             }
 
             inner = after;
+        }
+    }
+
+    if start_cjk_punct {
+        let reshaped = first.as_mut().or(last.as_mut()).and_then(Item::text_mut);
+        if let Some(reshaped) = reshaped {
+            if let Some(punct) = reshaped.glyphs.first() {
+                if punct.is_cjk_right_aligned_punctuation() {
+                    let shrink_amount = punct.shrinkability().0;
+                    let punct = reshaped.glyphs.to_mut().first_mut().unwrap();
+                    punct.shrink_left(shrink_amount);
+                    let amount_abs = shrink_amount.at(reshaped.size);
+                    reshaped.width -= amount_abs;
+                    width -= amount_abs;
+                }
+            }
         }
     }
 
@@ -1244,13 +1415,32 @@ fn commit(
         }
     }
 
-    // Determine how much to justify each space.
+    // Determine how much additional space is needed.
+    // The justicication_ratio is for the first step justification,
+    // extra_justification is for the last step.
+    // For more info on multi-step justification, see Procedures for Inter-
+    // Character Space Expansion in W3C document Chinese Layout Requirements.
     let fr = line.fr();
-    let mut justification = Abs::zero();
-    if remaining < Abs::zero() || (line.justify && fr.is_zero()) {
+    let mut justification_ratio = 0.0;
+    let mut extra_justification = Abs::zero();
+
+    let shrink = line.shrinkability();
+    let stretch = line.stretchability();
+    if remaining < Abs::zero() && shrink > Abs::zero() {
+        // Attempt to reduce the length of the line, using shrinkability.
+        justification_ratio = (remaining / shrink).max(-1.0);
+        remaining = (remaining + shrink).min(Abs::zero());
+    } else if line.justify && fr.is_zero() {
+        // Attempt to increase the length of the line, using stretchability.
+        if stretch > Abs::zero() {
+            justification_ratio = (remaining / stretch).min(1.0);
+            remaining = (remaining - stretch).max(Abs::zero());
+        }
+
         let justifiables = line.justifiables();
-        if justifiables > 0 {
-            justification = remaining / justifiables as f64;
+        if justifiables > 0 && remaining > Abs::zero() {
+            // Underfull line, distribute the extra space.
+            extra_justification = remaining / justifiables as f64;
             remaining = Abs::zero();
         }
     }
@@ -1286,10 +1476,10 @@ fn commit(
                 }
             }
             Item::Text(shaped) => {
-                let frame = shaped.build(vt, justification);
+                let frame = shaped.build(vt, justification_ratio, extra_justification);
                 push(&mut offset, frame);
             }
-            Item::Frame(frame) => {
+            Item::Frame(frame) | Item::Meta(frame) => {
                 push(&mut offset, frame.clone());
             }
         }
@@ -1368,9 +1558,8 @@ fn overhang(c: char) -> f64 {
         '.' | ',' => 0.8,
         ':' | ';' => 0.3,
 
-        // Arabic and Ideographic
+        // Arabic
         '\u{60C}' | '\u{6D4}' => 0.4,
-        '\u{3001}' | '\u{3002}' => 1.0,
 
         _ => 0.0,
     }

@@ -126,6 +126,8 @@ pub enum Expr {
     MathAttach(MathAttach),
     /// A fraction in math: `x/2`.
     MathFrac(MathFrac),
+    /// A root in math: `√x`, `∛x` or `∜x`.
+    MathRoot(MathRoot),
     /// An identifier: `left`.
     Ident(Ident),
     /// The `none` literal.
@@ -164,6 +166,8 @@ pub enum Expr {
     Closure(Closure),
     /// A let binding: `let x = 1`.
     Let(LetBinding),
+    //// A destructuring assignment: `(x, y) = (1, 2)`.
+    DestructAssign(DestructAssignment),
     /// A set rule: `set text(...)`.
     Set(SetRule),
     /// A show rule: `show heading: it => emph(it.body)`.
@@ -174,7 +178,7 @@ pub enum Expr {
     While(WhileLoop),
     /// A for loop: `for x in y { z }`.
     For(ForLoop),
-    /// A module import: `import a, b, c from "utils.typ"`.
+    /// A module import: `import "utils.typ": a, b, c`.
     Import(ModuleImport),
     /// A module include: `include "chapter1.typ"`.
     Include(ModuleInclude),
@@ -221,6 +225,7 @@ impl AstNode for Expr {
             SyntaxKind::MathDelimited => node.cast().map(Self::MathDelimited),
             SyntaxKind::MathAttach => node.cast().map(Self::MathAttach),
             SyntaxKind::MathFrac => node.cast().map(Self::MathFrac),
+            SyntaxKind::MathRoot => node.cast().map(Self::MathRoot),
             SyntaxKind::Ident => node.cast().map(Self::Ident),
             SyntaxKind::None => node.cast().map(Self::None),
             SyntaxKind::Auto => node.cast().map(Self::Auto),
@@ -240,6 +245,7 @@ impl AstNode for Expr {
             SyntaxKind::FuncCall => node.cast().map(Self::FuncCall),
             SyntaxKind::Closure => node.cast().map(Self::Closure),
             SyntaxKind::LetBinding => node.cast().map(Self::Let),
+            SyntaxKind::DestructAssignment => node.cast().map(Self::DestructAssign),
             SyntaxKind::SetRule => node.cast().map(Self::Set),
             SyntaxKind::ShowRule => node.cast().map(Self::Show),
             SyntaxKind::Conditional => node.cast().map(Self::Conditional),
@@ -280,6 +286,7 @@ impl AstNode for Expr {
             Self::MathDelimited(v) => v.as_untyped(),
             Self::MathAttach(v) => v.as_untyped(),
             Self::MathFrac(v) => v.as_untyped(),
+            Self::MathRoot(v) => v.as_untyped(),
             Self::Ident(v) => v.as_untyped(),
             Self::None(v) => v.as_untyped(),
             Self::Auto(v) => v.as_untyped(),
@@ -299,6 +306,7 @@ impl AstNode for Expr {
             Self::FuncCall(v) => v.as_untyped(),
             Self::Closure(v) => v.as_untyped(),
             Self::Let(v) => v.as_untyped(),
+            Self::DestructAssign(v) => v.as_untyped(),
             Self::Set(v) => v.as_untyped(),
             Self::Show(v) => v.as_untyped(),
             Self::Conditional(v) => v.as_untyped(),
@@ -316,49 +324,49 @@ impl AstNode for Expr {
 impl Expr {
     /// Can this expression be embedded into markup with a hashtag?
     pub fn hashtag(&self) -> bool {
-        match self {
-            Self::Ident(_) => true,
-            Self::None(_) => true,
-            Self::Auto(_) => true,
-            Self::Bool(_) => true,
-            Self::Int(_) => true,
-            Self::Float(_) => true,
-            Self::Numeric(_) => true,
-            Self::Str(_) => true,
-            Self::Code(_) => true,
-            Self::Content(_) => true,
-            Self::Array(_) => true,
-            Self::Dict(_) => true,
-            Self::Parenthesized(_) => true,
-            Self::FieldAccess(_) => true,
-            Self::FuncCall(_) => true,
-            Self::Let(_) => true,
-            Self::Set(_) => true,
-            Self::Show(_) => true,
-            Self::Conditional(_) => true,
-            Self::While(_) => true,
-            Self::For(_) => true,
-            Self::Import(_) => true,
-            Self::Include(_) => true,
-            Self::Break(_) => true,
-            Self::Continue(_) => true,
-            Self::Return(_) => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            Self::Ident(_)
+                | Self::None(_)
+                | Self::Auto(_)
+                | Self::Bool(_)
+                | Self::Int(_)
+                | Self::Float(_)
+                | Self::Numeric(_)
+                | Self::Str(_)
+                | Self::Code(_)
+                | Self::Content(_)
+                | Self::Array(_)
+                | Self::Dict(_)
+                | Self::Parenthesized(_)
+                | Self::FieldAccess(_)
+                | Self::FuncCall(_)
+                | Self::Let(_)
+                | Self::Set(_)
+                | Self::Show(_)
+                | Self::Conditional(_)
+                | Self::While(_)
+                | Self::For(_)
+                | Self::Import(_)
+                | Self::Include(_)
+                | Self::Break(_)
+                | Self::Continue(_)
+                | Self::Return(_)
+        )
     }
 
     /// Is this a literal?
     pub fn is_literal(&self) -> bool {
-        match self {
-            Self::None(_) => true,
-            Self::Auto(_) => true,
-            Self::Bool(_) => true,
-            Self::Int(_) => true,
-            Self::Float(_) => true,
-            Self::Numeric(_) => true,
-            Self::Str(_) => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            Self::None(_)
+                | Self::Auto(_)
+                | Self::Bool(_)
+                | Self::Int(_)
+                | Self::Float(_)
+                | Self::Numeric(_)
+                | Self::Str(_)
+        )
     }
 }
 
@@ -581,7 +589,14 @@ impl Raw {
 
     /// An optional identifier specifying the language to syntax-highlight in.
     pub fn lang(&self) -> Option<&str> {
-        let inner = self.0.text().trim_start_matches('`');
+        let text = self.0.text();
+
+        // Only blocky literals are supposed to contain a language.
+        if !text.starts_with("```") {
+            return Option::None;
+        }
+
+        let inner = text.trim_start_matches('`');
         let mut s = Scanner::new(inner);
         s.eat_if(is_id_start).then(|| {
             s.eat_while(is_id_continue);
@@ -681,7 +696,7 @@ node! {
 
 impl EnumItem {
     /// The explicit numbering, if any: `23.`.
-    pub fn number(&self) -> Option<NonZeroUsize> {
+    pub fn number(&self) -> Option<usize> {
         self.0.children().find_map(|node| match node.kind() {
             SyntaxKind::EnumMarker => node.text().trim_end_matches('.').parse().ok(),
             _ => Option::None,
@@ -846,6 +861,28 @@ impl MathFrac {
 }
 
 node! {
+    /// A root in math: `√x`, `∛x` or `∜x`.
+    MathRoot
+}
+
+impl MathRoot {
+    /// The index of the root.
+    pub fn index(&self) -> Option<usize> {
+        match self.0.children().next().map(|node| node.text().as_str()) {
+            Some("∜") => Some(4),
+            Some("∛") => Some(3),
+            Some("√") => Option::None,
+            _ => Option::None,
+        }
+    }
+
+    /// The radicand.
+    pub fn radicand(&self) -> Expr {
+        self.0.cast_first_match().unwrap_or_default()
+    }
+}
+
+node! {
     /// An identifier: `it`.
     Ident
 }
@@ -905,7 +942,17 @@ node! {
 impl Int {
     /// Get the integer value.
     pub fn get(&self) -> i64 {
-        self.0.text().parse().unwrap_or_default()
+        let text = self.0.text();
+        if let Some(rest) = text.strip_prefix("0x") {
+            i64::from_str_radix(rest, 16)
+        } else if let Some(rest) = text.strip_prefix("0o") {
+            i64::from_str_radix(rest, 8)
+        } else if let Some(rest) = text.strip_prefix("0b") {
+            i64::from_str_radix(rest, 2)
+        } else {
+            text.parse()
+        }
+        .unwrap_or_default()
     }
 }
 
@@ -1161,6 +1208,11 @@ impl Named {
     /// The right-hand side of the pair: `3pt`.
     pub fn expr(&self) -> Expr {
         self.0.cast_last_match().unwrap_or_default()
+    }
+
+    /// The right-hand side of the pair as an identifier.
+    pub fn expr_ident(&self) -> Option<Ident> {
+        self.0.cast_last_match()
     }
 }
 
@@ -1542,24 +1594,45 @@ impl Params {
     }
 }
 
+node! {
+    /// A spread: `..x` or `..x.at(0)`.
+    Spread
+}
+
+impl Spread {
+    /// Try to get an identifier.
+    pub fn name(&self) -> Option<Ident> {
+        self.0.cast_first_match()
+    }
+
+    /// Try to get an expression.
+    pub fn expr(&self) -> Option<Expr> {
+        self.0.cast_first_match()
+    }
+}
+
+node! {
+    /// An underscore: `_`
+    Underscore
+}
+
 /// A parameter to a closure.
 #[derive(Debug, Clone, Hash)]
 pub enum Param {
     /// A positional parameter: `x`.
-    Pos(Ident),
+    Pos(Pattern),
     /// A named parameter with a default value: `draw: false`.
     Named(Named),
     /// An argument sink: `..args`.
-    Sink(Ident),
+    Sink(Spread),
 }
 
 impl AstNode for Param {
     fn from_untyped(node: &SyntaxNode) -> Option<Self> {
         match node.kind() {
-            SyntaxKind::Ident => node.cast().map(Self::Pos),
             SyntaxKind::Named => node.cast().map(Self::Named),
-            SyntaxKind::Spread => node.cast_first_match().map(Self::Sink),
-            _ => Option::None,
+            SyntaxKind::Spread => node.cast().map(Self::Sink),
+            _ => node.cast().map(Self::Pos),
         }
     }
 
@@ -1573,29 +1646,168 @@ impl AstNode for Param {
 }
 
 node! {
+    /// A destructuring pattern: `x` or `(x, _, ..y)`.
+    Destructuring
+}
+
+impl Destructuring {
+    /// The bindings of the destructuring.
+    pub fn bindings(&self) -> impl Iterator<Item = DestructuringKind> + '_ {
+        self.0.children().filter_map(SyntaxNode::cast)
+    }
+
+    // Returns a list of all identifiers in the pattern.
+    pub fn idents(&self) -> impl Iterator<Item = Ident> + '_ {
+        self.bindings().filter_map(|binding| match binding {
+            DestructuringKind::Normal(Expr::Ident(ident)) => Some(ident),
+            DestructuringKind::Sink(spread) => spread.name(),
+            DestructuringKind::Named(named) => named.expr_ident(),
+            _ => Option::None,
+        })
+    }
+}
+
+/// The kind of an element in a destructuring pattern.
+#[derive(Debug, Clone, Hash)]
+pub enum DestructuringKind {
+    /// An expression: `x`.
+    Normal(Expr),
+    /// An argument sink: `..y`.
+    Sink(Spread),
+    /// Named arguments: `x: 1`.
+    Named(Named),
+    /// A placeholder: `_`.
+    Placeholder(Underscore),
+}
+
+impl AstNode for DestructuringKind {
+    fn from_untyped(node: &SyntaxNode) -> Option<Self> {
+        match node.kind() {
+            SyntaxKind::Named => node.cast().map(Self::Named),
+            SyntaxKind::Spread => node.cast().map(Self::Sink),
+            SyntaxKind::Underscore => node.cast().map(Self::Placeholder),
+            _ => node.cast().map(Self::Normal),
+        }
+    }
+
+    fn as_untyped(&self) -> &SyntaxNode {
+        match self {
+            Self::Normal(v) => v.as_untyped(),
+            Self::Named(v) => v.as_untyped(),
+            Self::Sink(v) => v.as_untyped(),
+            Self::Placeholder(v) => v.as_untyped(),
+        }
+    }
+}
+
+/// The kind of a pattern.
+#[derive(Debug, Clone, Hash)]
+pub enum Pattern {
+    /// A single expression: `x`.
+    Normal(Expr),
+    /// A placeholder: `_`.
+    Placeholder(Underscore),
+    /// A destructuring pattern: `(x, _, ..y)`.
+    Destructuring(Destructuring),
+}
+
+impl AstNode for Pattern {
+    fn from_untyped(node: &SyntaxNode) -> Option<Self> {
+        match node.kind() {
+            SyntaxKind::Destructuring => node.cast().map(Self::Destructuring),
+            SyntaxKind::Underscore => node.cast().map(Self::Placeholder),
+            _ => node.cast().map(Self::Normal),
+        }
+    }
+
+    fn as_untyped(&self) -> &SyntaxNode {
+        match self {
+            Self::Normal(v) => v.as_untyped(),
+            Self::Destructuring(v) => v.as_untyped(),
+            Self::Placeholder(v) => v.as_untyped(),
+        }
+    }
+}
+
+impl Pattern {
+    // Returns a list of all identifiers in the pattern.
+    pub fn idents(&self) -> Vec<Ident> {
+        match self {
+            Pattern::Normal(Expr::Ident(ident)) => vec![ident.clone()],
+            Pattern::Destructuring(destruct) => destruct.idents().collect(),
+            _ => vec![],
+        }
+    }
+}
+
+impl Default for Pattern {
+    fn default() -> Self {
+        Self::Normal(Expr::default())
+    }
+}
+
+node! {
     /// A let binding: `let x = 1`.
     LetBinding
 }
 
+#[derive(Debug)]
+pub enum LetBindingKind {
+    /// A normal binding: `let x = 1`.
+    Normal(Pattern),
+    /// A closure binding: `let f(x) = 1`.
+    Closure(Ident),
+}
+
+impl LetBindingKind {
+    // Returns a list of all identifiers in the pattern.
+    pub fn idents(&self) -> Vec<Ident> {
+        match self {
+            LetBindingKind::Normal(pattern) => pattern.idents(),
+            LetBindingKind::Closure(ident) => {
+                vec![ident.clone()]
+            }
+        }
+    }
+}
+
 impl LetBinding {
-    /// The binding to assign to.
-    pub fn binding(&self) -> Ident {
-        match self.0.cast_first_match() {
-            Some(Expr::Ident(binding)) => binding,
-            Some(Expr::Closure(closure)) => closure.name().unwrap_or_default(),
-            _ => Ident::default(),
+    /// The kind of the let binding.
+    pub fn kind(&self) -> LetBindingKind {
+        match self.0.cast_first_match::<Pattern>() {
+            Some(Pattern::Normal(Expr::Closure(closure))) => {
+                LetBindingKind::Closure(closure.name().unwrap_or_default())
+            }
+            pattern => LetBindingKind::Normal(pattern.unwrap_or_default()),
         }
     }
 
     /// The expression the binding is initialized with.
     pub fn init(&self) -> Option<Expr> {
-        if self.0.cast_first_match::<Ident>().is_some() {
-            // This is a normal binding like `let x = 1`.
-            self.0.children().filter_map(SyntaxNode::cast).nth(1)
-        } else {
-            // This is a closure binding like `let f(x) = 1`.
-            self.0.cast_first_match()
+        match self.kind() {
+            LetBindingKind::Normal(Pattern::Normal(_)) => {
+                self.0.children().filter_map(SyntaxNode::cast).nth(1)
+            }
+            LetBindingKind::Normal(_) => self.0.cast_first_match(),
+            LetBindingKind::Closure(_) => self.0.cast_first_match(),
         }
+    }
+}
+
+node! {
+    /// An assignment expression `(x, y) = (1, 2)`.
+    DestructAssignment
+}
+
+impl DestructAssignment {
+    /// The pattern of the assignment.
+    pub fn pattern(&self) -> Pattern {
+        self.0.cast_first_match::<Pattern>().unwrap_or_default()
+    }
+
+    /// The expression that is assigned.
+    pub fn value(&self) -> Expr {
+        self.0.cast_last_match().unwrap_or_default()
     }
 }
 
@@ -1695,40 +1907,21 @@ node! {
 
 impl ForLoop {
     /// The pattern to assign to.
-    pub fn pattern(&self) -> ForPattern {
+    pub fn pattern(&self) -> Pattern {
         self.0.cast_first_match().unwrap_or_default()
     }
 
     /// The expression to iterate over.
     pub fn iter(&self) -> Expr {
-        self.0.cast_first_match().unwrap_or_default()
+        self.0
+            .children()
+            .skip_while(|&c| c.kind() != SyntaxKind::In)
+            .find_map(SyntaxNode::cast)
+            .unwrap_or_default()
     }
 
     /// The expression to evaluate for each iteration.
     pub fn body(&self) -> Expr {
-        self.0.cast_last_match().unwrap_or_default()
-    }
-}
-
-node! {
-    /// A for loop's destructuring pattern: `x` or `x, y`.
-    ForPattern
-}
-
-impl ForPattern {
-    /// The key part of the pattern: index for arrays, name for dictionaries.
-    pub fn key(&self) -> Option<Ident> {
-        let mut children = self.0.children().filter_map(SyntaxNode::cast);
-        let key = children.next();
-        if children.next().is_some() {
-            key
-        } else {
-            Option::None
-        }
-    }
-
-    /// The value part of the pattern.
-    pub fn value(&self) -> Ident {
         self.0.cast_last_match().unwrap_or_default()
     }
 }

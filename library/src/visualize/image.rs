@@ -3,13 +3,19 @@ use std::path::Path;
 
 use typst::image::{Image, ImageFormat, RasterFormat, VectorFormat};
 
+use crate::meta::{Figurable, LocalName};
 use crate::prelude::*;
+use crate::text::families;
 
 /// A raster or vector graphic.
 ///
 /// Supported formats are PNG, JPEG, GIF and SVG.
 ///
-/// ## Example
+/// _Note:_ Work on SVG export is ongoing and there might be visual inaccuracies
+/// in the resulting PDF. Make sure to double-check embedded SVG images. If you
+/// have an issue, also feel free to report it on [GitHub][gh-svg].
+///
+/// ## Example { #example }
 /// ```example
 /// #figure(
 ///   image("molecular.jpg", width: 80%),
@@ -20,9 +26,11 @@ use crate::prelude::*;
 /// )
 /// ```
 ///
+/// [gh-svg]: https://github.com/typst/typst/issues?q=is%3Aopen+is%3Aissue+label%3Asvg
+///
 /// Display: Image
 /// Category: visualize
-#[element(Layout)]
+#[element(Layout, LocalName, Figurable)]
 pub struct ImageElem {
     /// Path to an image file.
     #[required]
@@ -30,7 +38,7 @@ pub struct ImageElem {
         let Spanned { v: path, span } =
             args.expect::<Spanned<EcoString>>("path to image file")?;
         let path: EcoString = vm.locate(&path).at(span)?.to_string_lossy().into();
-        let _ = load(vm.world(), &path).at(span)?;
+        let _ = load(vm.world(), &path, None, None).at(span)?;
         path
     )]
     pub path: EcoString,
@@ -41,19 +49,26 @@ pub struct ImageElem {
     /// The height of the image.
     pub height: Smart<Rel<Length>>,
 
+    /// A text describing the image.
+    pub alt: Option<EcoString>,
+
     /// How the image should adjust itself to a given area.
     #[default(ImageFit::Cover)]
     pub fit: ImageFit,
 }
 
 impl Layout for ImageElem {
+    #[tracing::instrument(name = "ImageElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
         styles: StyleChain,
         regions: Regions,
     ) -> SourceResult<Fragment> {
-        let image = load(vt.world, &self.path()).unwrap();
+        let first = families(styles).next();
+        let fallback_family = first.as_ref().map(|f| f.as_str());
+        let image =
+            load(vt.world, &self.path(), fallback_family, self.alt(styles)).unwrap();
         let sizing = Axes::new(self.width(styles), self.height(styles));
         let region = sizing
             .zip(regions.base())
@@ -112,6 +127,37 @@ impl Layout for ImageElem {
     }
 }
 
+impl LocalName for ImageElem {
+    fn local_name(&self, lang: Lang, _: Option<Region>) -> &'static str {
+        match lang {
+            Lang::ALBANIAN => "Figurë",
+            Lang::ARABIC => "شكل",
+            Lang::BOKMÅL => "Figur",
+            Lang::CHINESE => "图",
+            Lang::CZECH => "Obrázek",
+            Lang::DANISH => "Figur",
+            Lang::DUTCH => "Figuur",
+            Lang::FILIPINO => "Pigura",
+            Lang::FRENCH => "Figure",
+            Lang::GERMAN => "Abbildung",
+            Lang::ITALIAN => "Figura",
+            Lang::NYNORSK => "Figur",
+            Lang::POLISH => "Rysunek",
+            Lang::PORTUGUESE => "Figura",
+            Lang::RUSSIAN => "Рисунок",
+            Lang::SLOVENIAN => "Slika",
+            Lang::SPANISH => "Figura",
+            Lang::SWEDISH => "Figur",
+            Lang::TURKISH => "Şekil",
+            Lang::UKRAINIAN => "Рисунок",
+            Lang::VIETNAMESE => "Hình",
+            Lang::ENGLISH | _ => "Figure",
+        }
+    }
+}
+
+impl Figurable for ImageElem {}
+
 /// How an image should adjust itself to a given area.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Cast)]
 pub enum ImageFit {
@@ -126,7 +172,12 @@ pub enum ImageFit {
 
 /// Load an image from a path.
 #[comemo::memoize]
-fn load(world: Tracked<dyn World>, full: &str) -> StrResult<Image> {
+fn load(
+    world: Tracked<dyn World + '_>,
+    full: &str,
+    fallback_family: Option<&str>,
+    alt: Option<EcoString>,
+) -> StrResult<Image> {
     let full = Path::new(full);
     let buffer = world.file(full)?;
     let ext = full.extension().and_then(OsStr::to_str).unwrap_or_default();
@@ -135,7 +186,7 @@ fn load(world: Tracked<dyn World>, full: &str) -> StrResult<Image> {
         "jpg" | "jpeg" => ImageFormat::Raster(RasterFormat::Jpg),
         "gif" => ImageFormat::Raster(RasterFormat::Gif),
         "svg" | "svgz" => ImageFormat::Vector(VectorFormat::Svg),
-        _ => return Err("unknown image format".into()),
+        _ => bail!("unknown image format"),
     };
-    Image::new(buffer, format)
+    Image::with_fonts(buffer, format, world, fallback_family, alt)
 }

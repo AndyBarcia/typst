@@ -43,11 +43,18 @@ The number can be negative, zero, or positive. As Typst uses 64 bits to store
 integers, integers cannot be smaller than `{-9223372036854775808}` or larger than
 `{9223372036854775807}`.
 
+The number can also be specified as hexadecimal, octal, or binary by starting it
+with a zero followed by either `x`, `o`, or `b`.
+
 ## Example
 ```example
 #(1 + 2) \
 #(2 - 5) \
 #(3 + 4 < 8)
+
+#0xff \
+#0o10 \
+#0b1001
 ```
 
 # Float
@@ -167,6 +174,153 @@ Produces the negative of the color.
 
 - returns: color
 
+# Datetime
+Represents a date, a time, or a combination of both. Can be created by either
+specifying a custom datetime using the [`datetime`]($func/datetime) function or
+getting the current date with [`datetime.today`]($func/datetime.today).
+
+## Example
+```example
+#let date = datetime(
+  year: 2020,
+  month: 10,
+  day: 4,
+)
+
+#date.display() \
+#date.display(
+  "y:[year repr:last_two]"
+)
+
+#let time = datetime(
+  hour: 18,
+  minute: 2,
+  second: 23,
+)
+
+#time.display() \
+#time.display(
+  "h:[hour repr:12][period]"
+)
+```
+
+## Format
+You can specify a customized formatting using the
+[`display`]($type/datetime.display) method. The format of a datetime is
+specified by providing _components_ with a specified number of _modifiers_. A
+component represents a certain part of the datetime that you want to display,
+and with the help of modifiers you can define how you want to display that
+component. In order to display a component, you wrap the name of the component
+in square brackets (e.g. `[[year]]` will display the year). In order to add
+modifiers, you add a space after the component name followed by the name of the
+modifier, a colon and the value of the modifier (e.g. `[[month repr:short]]`
+will display the short representation of the month).
+
+The possible combination of components and their respective modifiers is as
+follows:
+
+* `year`: Displays the year of the datetime.
+  * `padding`: Can be either `zero`, `space` or `none`. Specifies how the year
+    is padded.
+  * `repr` Can be either `full` in which case the full year is displayed or
+    `last_two` in which case only the last two digits are displayed.
+  * `sign`: Can be either `automatic` or `mandatory`. Specifies when the sign
+    should be displayed.
+* `month`: Displays the month of the datetime.
+  * `padding`: Can be either `zero`, `space` or `none`. Specifies how the month
+    is padded.
+  * `repr`: Can be either `numerical`, `long` or `short`. Specifies if the month
+    should be displayed as a number or a word. Unfortunately, when choosing the
+    word representation, it can currently only display the English version. In
+    the future, it is planned to support localization.
+* `day`: Displays the day of the datetime.
+  * `padding`: Can be either `zero`, `space` or `none`. Specifies how the day
+    is padded.
+* `week_number`: Displays the week number of the datetime.
+  * `padding`: Can be either `zero`, `space` or `none`. Specifies how the week
+    number is padded.
+  * `repr`: Can be either `ISO`, `sunday` or `monday`. In the case of `ISO`,
+    week numbers are between 1 and 53, while the other ones are between 0
+    and 53.
+* `weekday`: Displays the weekday of the date.
+  * `repr` Can be either `long`, `short`, `sunday` or `monday`. In the case of
+    `long` and `short`, the corresponding English name will be displayed (same
+    as for the month, other languages are currently not supported). In the case
+    of `sunday` and `monday`, the numerical value will be displayed (assuming
+    Sunday and Monday as the first day of the week, respectively).
+  * `one_indexed`: Can be either `true` or `false`. Defines whether the
+    numerical representation of the week starts with 0 or 1.
+* `hour`: Displays the hour of the date.
+  * `padding`: Can be either `zero`, `space` or `none`. Specifies how the hour
+    is padded.
+  * `repr`: Can be either `24` or `12`. Changes whether the hour is displayed in
+    the 24-hour or 12-hour format.
+* `period`: The AM/PM part of the hour
+  * `case`: Can be `lower` to display it in lower case and `upper` to display it
+    in upper case.
+* `minute`: Displays the minute of the date.
+  * `padding`: Can be either `zero`, `space` or `none`. Specifies how the minute
+    is padded.
+* `second`: Displays the second of the date.
+  * `padding`: Can be either `zero`, `space` or `none`. Specifies how the second
+    is padded.
+
+Keep in mind that not always all components can be used. For example, if
+you create a new datetime with `{datetime(year: 2023, month: 10, day: 13)}`, it
+will be stored as a plain date internally, meaning that you cannot use
+components such as `hour` or `minute`, which would only work on datetimes
+that have a specified time.
+
+## Methods
+### display()
+Displays the datetime in a certain way. Depending on whether you have defined
+just a date, a time or both, the default format will be different.
+If you specified a date, it will be `[[year]-[month]-[day]]`. If you specified a
+time, it will be `[[hour]:[minute]:[second]]`. In the case of a datetime, it
+will be `[[year]-[month]-[day] [hour]:[minute]:[second]]`.
+
+- pattern: string (positional)
+  The format used to display the datetime.
+- returns: string
+
+### year()
+Returns the year of the datetime, if it exists. Otherwise, it returns `{none}`.
+
+- returns: integer or none
+
+### month()
+Returns the month of the datetime, if it exists. Otherwise, it returns `{none}`.
+
+- returns: integer or none
+
+### weekday()
+Returns the weekday of the datetime as a number starting with 1 from Monday, if
+it exists. Otherwise, it returns `{none}`.
+
+- returns: integer or none
+
+### day()
+Returns the day of the datetime, if it exists. Otherwise, it returns `{none}`.
+
+- returns: integer or none
+
+### hour()
+Returns the hour of the datetime, if it exists. Otherwise, it returns `{none}`.
+
+- returns: integer or none
+
+### minute()
+Returns the minute of the datetime, if it exists. Otherwise, it returns
+`{none}`.
+
+- returns: integer or none
+
+### second()
+Returns the second of the datetime, if it exists. Otherwise, it returns
+`{none}`.
+
+- returns: integer or none
+
 # Symbol
 A Unicode symbol.
 
@@ -212,7 +366,8 @@ Typst provides utility methods for string manipulation. Many of these methods
 either a string or a [regular expression]($func/regex). This makes the methods
 quite versatile.
 
-All lengths and indices are expressed in terms of UTF-8 bytes.
+All lengths and indices are expressed in terms of UTF-8 characters. Indices are
+zero-based and negative indices wrap around to the end of the string.
 
 ### Example
 ```example
@@ -252,11 +407,14 @@ Fails with an error if the string is empty.
 - returns: any
 
 ### at()
-Extract the first grapheme cluster after the specified index. Fails with an
-error if the index is out of bounds.
+Extract the first grapheme cluster after the specified index. Returns the
+default value if the index is out of bounds or fails with an error if no default
+value was specified.
 
 - index: integer (positional, required)
   The byte index.
+- default: any (named)
+  A default value to return if the index is out of bounds.
 - returns: string
 
 ### slice()
@@ -354,8 +512,8 @@ string and returns the resulting string.
 
 - pattern: string or regex (positional, required)
   The pattern to search for.
-- replacement: string (positional, required)
-  The string to replace the matches with.
+- replacement: string or function (positional, required)
+  The string to replace the matches with or a function that gets a dictionary for each match and can return individual replacement strings.
 - count: integer (named)
   If given, only the first `count` matches of the pattern are placed.
 - returns: string
@@ -443,11 +601,24 @@ Whether the content has the specified field.
 - returns: boolean
 
 ### at()
-Access the specified field on the content.
+Access the specified field on the content. Returns the default value if the
+field does not exist or fails with an error if no default value was specified.
 
 - field: string (positional, required)
   The field to access.
+- default: any (named)
+  A default value to return if the field does not exist.
 - returns: any
+
+### fields()
+Return the fields of this content.
+
+```example
+#rect(
+  width: 10cm,
+  height: 10cm,
+).fields()
+```
 
 ### location()
 The location of the content. This is only available on content returned by
@@ -470,8 +641,9 @@ Arrays can be added together with the `+` operator,
 [joined together]($scripting/#blocks) and multiplied with
 integers.
 
-Empty parenthesis yield an array of length zero and a parentheses-wrapped value
-with trailing comma yields an array of length one.
+**Note:** An array of length one needs a trailing comma, as in `{(1,)}`. This is
+to disambiguate from a simple parenthesized expressions like `{(1 + 2) * 3}`.
+An empty array is written as `{()}`.
 
 ## Example
 ```example
@@ -510,12 +682,14 @@ Fails with an error if the array is empty.
 - returns: any
 
 ### at()
-Returns the item at the specified index in the array.
-May be used on the left-hand side of an assignment.
-Fails with an error if the index is out of bounds.
+Returns the item at the specified index in the array. May be used on the
+left-hand side of an assignment. Returns the default value if the index is out
+of bounds or fails with an error if no default value was specified.
 
 - index: integer (positional, required)
   The index at which to retrieve the item.
+- default: any (named)
+  A default value to return if the index is out of bounds.
 - returns: any
 
 ### push()
@@ -603,6 +777,25 @@ transformed with the given function.
   The function to apply to each item.
 - returns: array
 
+### enumerate()
+Returns a new array with the values alongside their indices.
+
+The returned array consists of `(index, value)` pairs in the form of length-2
+arrays. These can be [destructured]($scripting/#bindings) with a let binding or
+for loop.
+
+- returns: array
+
+### zip()
+Zips the array with another array. If the two arrays are of unequal length, it
+will only zip up until the last element of the smaller array and the remaining
+elements will be ignored. The return value is an array where each element is yet
+another array of size 2.
+
+- other: array (positional, required)
+  The other array which should be zipped with the current one.
+- returns: array
+
 ### fold()
 Folds all items into a single value using an accumulator function.
 
@@ -611,6 +804,20 @@ Folds all items into a single value using an accumulator function.
 - folder: function (positional, required)
   The folding function. Must have two parameters: One for the accumulated value
   and one for an item.
+- returns: any
+
+### sum()
+Sums all items (works for any types that can be added).
+
+- default: any (named)
+  What to return if the array is empty. Must be set if the array can be empty.
+- returns: any
+
+### product()
+Calculates the product all items (works for any types that can be multiplied)
+
+- default: any (named)
+  What to return if the array is empty. Must be set if the array can be empty.
 - returns: any
 
 ### any()
@@ -649,13 +856,17 @@ Combine all items in the array into one.
 ### sorted()
 Return a new array with the same items, but sorted.
 
+- key: function (named)
+  If given, applies this function to the elements in the array to determine the keys to sort by.
 - returns: array
 
 # Dictionary
 A map from string keys to values.
 
 You can construct a dictionary by enclosing comma-separated `key: value` pairs
-in parentheses. The values do not have to be of the same type.
+in parentheses. The values do not have to be of the same type. Since empty
+parentheses already yield an empty array, you have to use the special `(:)`
+syntax to create an empty dictionary.
 
 A dictionary is conceptually similar to an array, but it is indexed by strings
 instead of integers. You can access and create dictionary entries with the
@@ -666,12 +877,8 @@ the value. Dictionaries can be added with the `+` operator and
 To check whether a key is present in the dictionary, use the `in` keyword.
 
 You can iterate over the pairs in a dictionary using a
-[for loop]($scripting/#loops).
-Dictionaries are always ordered by key.
-
-Since empty parentheses already yield an empty array, you have to use the
-special `(:)` syntax to create an empty dictionary.
-
+[for loop]($scripting/#loops). This will iterate in the order the pairs were
+inserted / declared.
 
 ## Example
 ```example
@@ -697,13 +904,15 @@ The number of pairs in the dictionary.
 - returns: integer
 
 ### at()
-Returns the value associated with the specified key in the dictionary.
-May be used on the left-hand side of an assignment if the key is already
-present in the dictionary.
-Fails with an error if the key is not part of the dictionary.
+Returns the value associated with the specified key in the dictionary. May be
+used on the left-hand side of an assignment if the key is already present in the
+dictionary. Returns the default value if the key is not part of the dictionary
+or fails with an error if no default value was specified.
 
-- index: integer (positional, required)
-  The index at which to retrieve the item.
+- key: string (positional, required)
+  The key at which to retrieve the item.
+- default: any (named)
+  A default value to return if the key is not part of the dictionary.
 - returns: any
 
 ### insert()
@@ -716,12 +925,12 @@ If the dictionary already contains this key, the value is updated.
   The value of the pair that should be inserted.
 
 ### keys()
-Returns the keys of the dictionary as an array in sorted order.
+Returns the keys of the dictionary as an array in insertion order.
 
 - returns: array
 
 ### values()
-Returns the values of the dictionary as an array in key-order.
+Returns the values of the dictionary as an array in insertion order.
 
 - returns: array
 
@@ -773,6 +982,19 @@ documentation about [set]($styling/#set-rules) and
 [show]($styling/#show-rules) rules to learn about additional ways
 you can work with functions in Typst.
 
+### Element functions { #element-functions }
+Some functions are associated with _elements_ like [headings]($func/heading) or
+[tables]($func/table). When called, these create an element of their respective
+kind. In contrast to normal functions, they can further be used in
+[set rules]($styling/#set-rules), [show rules]($styling/#show-rules), and
+[selectors]($type/selector).
+
+### Function scopes { #function-scopes }
+Functions can hold related definitions in their own scope, similar to a
+[module]($scripting/#modules). Examples of this are
+[`assert.eq`]($func/assert.eq) or [`list.item`]($func/list.item). However, this
+feature is currently only available for built-in functions.
+
 ### Defining functions { #definitions }
 You can define your own function with a
 [let binding]($scripting/#bindings) that has a parameter list after
@@ -820,6 +1042,10 @@ once?
 In Typst, all functions are _pure._ This means that for the same
 arguments, they always return the same result. They cannot "remember" things to
 produce another value when they are called a second time.
+
+The only exception are built-in methods like
+[`array.push(value)`]($type/array.push). These can modify the values they are
+called on.
 
 ## Methods
 ### with()
@@ -870,6 +1096,79 @@ Returns the captured positional arguments as an array.
 Returns the captured named arguments as a dictionary.
 
 - returns: dictionary
+
+# Selector
+A filter for selecting elements within the document.
+
+You can construct a selector in the following ways:
+- you can use an element [function]($type/function)
+- you can filter for an element function with
+  [specific fields]($type/function.where)
+- you can use a [string]($type/string) or [regular expression]($func/regex)
+- you can use a [`{<label>}`]($func/label)
+- you can use a [`location`]($func/locate)
+- call the [`selector`]($func/selector) function to convert any of the above
+  types into a selector value and use the methods below to refine it
+
+Selectors are used to [apply styling rules]($styling/#show-rules) to elements.
+You can also use selectors to [query]($func/query) the document for certain
+types of elements.
+
+Furthermore, you can pass a selector to several of Typst's built-in functions to
+configure their behaviour. One such example is the [outline]($func/outline)
+where it can be used to change which elements are listed within the outline.
+
+Multiple selectors can be combined using the methods shown below. However, not
+all kinds of selectors are supported in all places, at the moment.
+
+## Example
+```example
+#locate(loc => query(
+  heading.where(level: 1)
+    .or(heading.where(level: 2)),
+  loc,
+))
+
+= This will be found
+== So will this
+=== But this will not.
+```
+
+## Methods
+### or()
+Allows combining any of a series of selectors. This is used to
+select multiple components or components with different properties
+all at once.
+
+- other: selector (variadic, required)
+  The list of selectors to match on.
+
+### and()
+Allows combining all of a series of selectors. This is used to check
+whether a component meets multiple selection rules simultaneously.
+
+- other: selector (variadic, required)
+  The list of selectors to match on.
+
+### before()
+Returns a modified selector that will only match elements that occur before the
+first match of the selector argument.
+
+- end: selector (positional, required)
+  The original selection will end at the first match of `end`.
+- inclusive: boolean (named)
+  Whether `end` itself should match or not. This is only relevant if both
+  selectors match the same type of element. Defaults to `{true}`.
+
+### after()
+Returns a modified selector that will only match elements that occur after the
+first match of the selector argument.
+
+- start: selector (positional, required)
+  The original selection will start at the first match of `start`.
+- inclusive: boolean (named)
+  Whether `start` itself should match or not. This is only relevant if both
+  selectors match the same type of element. Defaults to `{true}`.
 
 # Module
 An evaluated module, either built-in or resulting from a file.

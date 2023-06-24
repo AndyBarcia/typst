@@ -8,6 +8,7 @@ use crate::diag::StrResult;
 
 /// An evaluated module, ready for importing or typesetting.
 #[derive(Clone, Hash)]
+#[allow(clippy::derived_hash_with_manual_eq)]
 pub struct Module(Arc<Repr>);
 
 /// The internal representation.
@@ -60,7 +61,7 @@ impl Module {
 
     /// Try to access a definition in the module.
     pub fn get(&self, name: &str) -> StrResult<&Value> {
-        self.scope().get(&name).ok_or_else(|| {
+        self.scope().get(name).ok_or_else(|| {
             eco_format!("module `{}` does not contain `{name}`", self.name())
         })
     }

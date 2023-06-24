@@ -5,21 +5,22 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use ecow::eco_format;
-use siphasher::sip128::{Hasher128, SipHasher};
+use siphasher::sip128::{Hasher128, SipHasher13};
 
 use super::{
-    cast_to_value, format_str, ops, Args, Array, Cast, CastInfo, Content, Dict, Func,
-    Label, Module, Str, Symbol,
+    cast, format_str, ops, Args, Array, CastInfo, Content, Dict, FromValue, Func,
+    IntoValue, Module, Reflect, Str, Symbol,
 };
 use crate::diag::StrResult;
 use crate::geom::{Abs, Angle, Color, Em, Fr, Length, Ratio, Rel};
-use crate::model::Styles;
+use crate::model::{Label, Styles};
 use crate::syntax::{ast, Span};
 
 /// A computational value.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum Value {
     /// The value that indicates the absence of a meaningful value.
+    #[default]
     None,
     /// A value that indicates some smart default behaviour.
     Auto,
@@ -53,7 +54,7 @@ pub enum Value {
     Styles(Styles),
     /// An array of values: `(1, "hi", 12cm)`.
     Array(Array),
-    /// A dictionary value: `(color: #f79143, pattern: dashed)`.
+    /// A dictionary value: `(a: 1, b: "hi")`.
     Dict(Dict),
     /// An executable function.
     Func(Func),
@@ -78,11 +79,11 @@ impl Value {
     pub fn numeric(pair: (f64, ast::Unit)) -> Self {
         let (v, unit) = pair;
         match unit {
-            ast::Unit::Length(unit) => Abs::with_unit(v, unit).into(),
-            ast::Unit::Angle(unit) => Angle::with_unit(v, unit).into(),
-            ast::Unit::Em => Em::new(v).into(),
-            ast::Unit::Fr => Fr::new(v).into(),
-            ast::Unit::Percent => Ratio::new(v / 100.0).into(),
+            ast::Unit::Length(unit) => Abs::with_unit(v, unit).into_value(),
+            ast::Unit::Angle(unit) => Angle::with_unit(v, unit).into_value(),
+            ast::Unit::Em => Em::new(v).into_value(),
+            ast::Unit::Fr => Fr::new(v).into_value(),
+            ast::Unit::Percent => Ratio::new(v / 100.0).into_value(),
         }
     }
 
@@ -115,17 +116,18 @@ impl Value {
     }
 
     /// Try to cast the value into a specific type.
-    pub fn cast<T: Cast>(self) -> StrResult<T> {
-        T::cast(self)
+    pub fn cast<T: FromValue>(self) -> StrResult<T> {
+        T::from_value(self)
     }
 
     /// Try to access a field on the value.
     pub fn field(&self, field: &str) -> StrResult<Value> {
         match self {
-            Self::Symbol(symbol) => symbol.clone().modified(&field).map(Self::Symbol),
-            Self::Dict(dict) => dict.at(&field).cloned(),
-            Self::Content(content) => content.at(&field),
-            Self::Module(module) => module.get(&field).cloned(),
+            Self::Symbol(symbol) => symbol.clone().modified(field).map(Self::Symbol),
+            Self::Dict(dict) => dict.at(field, None).cloned(),
+            Self::Content(content) => content.at(field, None),
+            Self::Module(module) => module.get(field).cloned(),
+            Self::Func(func) => func.get(field).cloned(),
             v => Err(eco_format!("cannot access fields on type {}", v.type_name())),
         }
     }
@@ -168,12 +170,6 @@ impl Value {
     }
 }
 
-impl Default for Value {
-    fn default() -> Self {
-        Value::None
-    }
-}
-
 impl Debug for Value {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
@@ -211,7 +207,7 @@ impl PartialEq for Value {
 
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        ops::compare(self, other)
+        ops::compare(self, other).ok()
     }
 }
 
@@ -247,6 +243,7 @@ impl Hash for Value {
 
 /// A dynamic value.
 #[derive(Clone, Hash)]
+#[allow(clippy::derived_hash_with_manual_eq)]
 pub struct Dynamic(Arc<dyn Bounds>);
 
 impl Dynamic {
@@ -286,8 +283,9 @@ impl PartialEq for Dynamic {
     }
 }
 
-cast_to_value! {
-    v: Dynamic => Value::Dyn(v)
+cast! {
+    Dynamic,
+    self => Value::Dyn(self),
 }
 
 trait Bounds: Debug + Sync + Send + 'static {
@@ -314,10 +312,11 @@ where
         T::TYPE_NAME
     }
 
+    #[tracing::instrument(skip_all)]
     fn hash128(&self) -> u128 {
         // Also hash the TypeId since values with different types but
         // equal data should be different.
-        let mut state = SipHasher::new();
+        let mut state = SipHasher13::new();
         self.type_id().hash(&mut state);
         self.hash(&mut state);
         state.finish128().as_u128()
@@ -339,20 +338,32 @@ pub trait Type {
 /// Implement traits for primitives.
 macro_rules! primitive {
     (
-        $type:ty: $name:literal, $variant:ident
+        $ty:ty: $name:literal, $variant:ident
         $(, $other:ident$(($binding:ident))? => $out:expr)*
     ) => {
-        impl Type for $type {
+        impl Type for $ty {
             const TYPE_NAME: &'static str = $name;
         }
 
-        impl Cast for $type {
-            fn is(value: &Value) -> bool {
+        impl Reflect for $ty {
+            fn describe() -> CastInfo {
+                CastInfo::Type(Self::TYPE_NAME)
+            }
+
+            fn castable(value: &Value) -> bool {
                 matches!(value, Value::$variant(_)
                     $(|  primitive!(@$other $(($binding))?))*)
             }
+        }
 
-            fn cast(value: Value) -> StrResult<Self> {
+        impl IntoValue for $ty {
+            fn into_value(self) -> Value {
+                Value::$variant(self)
+            }
+        }
+
+        impl FromValue for $ty {
+            fn from_value(value: Value) -> StrResult<Self> {
                 match value {
                     Value::$variant(v) => Ok(v),
                     $(Value::$other$(($binding))? => Ok($out),)*
@@ -362,16 +373,6 @@ macro_rules! primitive {
                         v.type_name(),
                     )),
                 }
-            }
-
-            fn describe() -> CastInfo {
-                CastInfo::Type(Self::TYPE_NAME)
-            }
-        }
-
-        impl From<$type> for Value {
-            fn from(v: $type) -> Self {
-                Value::$variant(v)
             }
         }
     };
@@ -410,8 +411,8 @@ primitive! { Styles: "styles", Styles }
 primitive! { Array: "array", Array }
 primitive! { Dict: "dictionary", Dict }
 primitive! { Func: "function", Func }
-primitive! { Module: "module", Module }
 primitive! { Args: "arguments", Args }
+primitive! { Module: "module", Module }
 
 #[cfg(test)]
 mod tests {
@@ -420,8 +421,8 @@ mod tests {
     use crate::geom::RgbaColor;
 
     #[track_caller]
-    fn test(value: impl Into<Value>, exp: &str) {
-        assert_eq!(format!("{:?}", value.into()), exp);
+    fn test(value: impl IntoValue, exp: &str) {
+        assert_eq!(format!("{:?}", value.into_value()), exp);
     }
 
     #[test]
@@ -430,7 +431,7 @@ mod tests {
         test(Value::None, "none");
         test(false, "false");
         test(12i64, "12");
-        test(3.14, "3.14");
+        test(3.24, "3.24");
         test(Abs::pt(5.5), "5.5pt");
         test(Angle::deg(90.0), "90deg");
         test(Ratio::one() / 2.0, "50%");
@@ -448,6 +449,6 @@ mod tests {
         test(array![1, 2], "(1, 2)");
         test(dict![], "(:)");
         test(dict!["one" => 1], "(one: 1)");
-        test(dict!["two" => false, "one" => 1], "(one: 1, two: false)");
+        test(dict!["two" => false, "one" => 1], "(two: false, one: 1)");
     }
 }

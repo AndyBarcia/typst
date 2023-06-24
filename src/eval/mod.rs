@@ -13,43 +13,57 @@ mod str;
 #[macro_use]
 mod value;
 mod args;
+mod auto;
+mod datetime;
 mod func;
+mod int;
 mod methods;
 mod module;
-mod ops;
+mod none;
+pub mod ops;
 mod scope;
 mod symbol;
 
 #[doc(hidden)]
-pub use once_cell::sync::Lazy;
+pub use {
+    self::library::LANG_ITEMS,
+    ecow::{eco_format, eco_vec},
+    indexmap::IndexMap,
+    once_cell::sync::Lazy,
+};
 
-pub use self::args::*;
-pub use self::array::*;
-pub use self::cast::*;
-pub use self::dict::*;
-pub use self::func::*;
-pub use self::library::*;
-pub use self::module::*;
-pub use self::scope::*;
-pub use self::str::*;
-pub use self::symbol::*;
-pub use self::value::*;
+#[doc(inline)]
+pub use typst_macros::{func, symbols};
 
-pub(crate) use self::methods::methods_on;
+pub use self::args::{Arg, Args};
+pub use self::array::{array, Array};
+pub use self::auto::AutoValue;
+pub use self::cast::{
+    cast, Cast, CastInfo, FromValue, IntoResult, IntoValue, Never, Reflect, Variadics,
+};
+pub use self::datetime::Datetime;
+pub use self::dict::{dict, Dict};
+pub use self::func::{Func, FuncInfo, NativeFunc, Param, ParamInfo};
+pub use self::library::{set_lang_items, LangItems, Library};
+pub use self::methods::methods_on;
+pub use self::module::Module;
+pub use self::none::NoneValue;
+pub use self::scope::{Scope, Scopes};
+pub use self::str::{format_str, Regex, Str};
+pub use self::symbol::Symbol;
+pub use self::value::{Dynamic, Type, Value};
 
-use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::mem;
 use std::path::{Path, PathBuf};
 
-use comemo::{Track, Tracked, TrackedMut};
-use ecow::EcoVec;
+use comemo::{Track, Tracked, TrackedMut, Validate};
+use ecow::{EcoString, EcoVec};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::diag::{
-    bail, error, At, SourceError, SourceResult, StrResult, Trace, Tracepoint,
-};
+use self::func::{CapturesVisitor, Closure};
 use crate::model::{
-    Content, Introspector, Label, Recipe, Selector, StabilityProvider, Styles, Transform,
+    Content, Introspector, Label, Locator, Recipe, ShowableSelector, Styles, Transform,
     Unlabellable, Vt,
 };
 use crate::syntax::ast::AstNode;
@@ -58,14 +72,19 @@ use crate::syntax::{
 };
 use crate::util::PathExt;
 use crate::World;
+use crate::{
+    diag::{bail, error, At, SourceError, SourceResult, StrResult, Trace, Tracepoint},
+    model::DelayedErrors,
+};
 
 const MAX_ITERATIONS: usize = 10_000;
-const MAX_CALL_DEPTH: usize = 256;
+const MAX_CALL_DEPTH: usize = 64;
 
 /// Evaluate a source file and return the resulting module.
 #[comemo::memoize]
+#[tracing::instrument(skip(world, route, tracer, source))]
 pub fn eval(
-    world: Tracked<dyn World>,
+    world: Tracked<dyn World + '_>,
     route: Tracked<Route>,
     tracer: TrackedMut<Tracer>,
     source: &Source,
@@ -81,23 +100,28 @@ pub fn eval(
     let library = world.library();
     set_lang_items(library.items.clone());
 
-    // Evaluate the module.
-    let route = unsafe { Route::insert(route, id) };
-    let scopes = Scopes::new(Some(library));
-    let mut provider = StabilityProvider::new();
-    let introspector = Introspector::new(&[]);
+    // Prepare VT.
+    let mut locator = Locator::default();
+    let introspector = Introspector::default();
+    let mut delayed = DelayedErrors::default();
     let vt = Vt {
         world,
-        tracer,
-        provider: provider.track_mut(),
         introspector: introspector.track(),
+        locator: &mut locator,
+        delayed: delayed.track_mut(),
+        tracer,
     };
+
+    // Prepare VM.
+    let route = Route::insert(route, id);
+    let scopes = Scopes::new(Some(library));
     let mut vm = Vm::new(vt, route.track(), id, scopes);
     let root = match source.root().cast::<ast::Markup>() {
         Some(markup) if vm.traced.is_some() => markup,
         _ => source.ast()?,
     };
 
+    // Evaluate the module.
     let result = root.eval(&mut vm);
 
     // Handle control flow.
@@ -115,7 +139,7 @@ pub fn eval(
 /// Everything in the output is associated with the given `span`.
 #[comemo::memoize]
 pub fn eval_string(
-    world: Tracked<dyn World>,
+    world: Tracked<dyn World + '_>,
     code: &str,
     span: Span,
 ) -> SourceResult<Value> {
@@ -127,20 +151,26 @@ pub fn eval_string(
         return Err(Box::new(errors));
     }
 
-    let id = SourceId::detached();
-    let library = world.library();
-    let scopes = Scopes::new(Some(library));
-    let route = Route::default();
+    // Prepare VT.
     let mut tracer = Tracer::default();
-    let mut provider = StabilityProvider::new();
-    let introspector = Introspector::new(&[]);
+    let mut locator = Locator::default();
+    let mut delayed = DelayedErrors::default();
+    let introspector = Introspector::default();
     let vt = Vt {
         world,
-        tracer: tracer.track_mut(),
-        provider: provider.track_mut(),
         introspector: introspector.track(),
+        locator: &mut locator,
+        delayed: delayed.track_mut(),
+        tracer: tracer.track_mut(),
     };
+
+    // Prepare VM.
+    let route = Route::default();
+    let id = SourceId::detached();
+    let scopes = Scopes::new(Some(world.library()));
     let mut vm = Vm::new(vt, route.track(), id, scopes);
+
+    // Evaluate the code.
     let code = root.cast::<ast::Code>().unwrap();
     let result = code.eval(&mut vm);
 
@@ -162,11 +192,11 @@ pub struct Vm<'a> {
     /// The language items.
     items: LangItems,
     /// The route of source ids the VM took to reach its current location.
-    route: Tracked<'a, Route>,
+    route: Tracked<'a, Route<'a>>,
     /// The current location.
     location: SourceId,
     /// A control flow event that is currently happening.
-    flow: Option<Flow>,
+    flow: Option<FlowEvent>,
     /// The stack of scopes.
     scopes: Scopes<'a>,
     /// The current call depth.
@@ -198,13 +228,14 @@ impl<'a> Vm<'a> {
     }
 
     /// Access the underlying world.
-    pub fn world(&self) -> Tracked<'a, dyn World> {
+    pub fn world(&self) -> Tracked<'a, dyn World + 'a> {
         self.vt.world
     }
 
     /// Define a variable in the current scope.
-    pub fn define(&mut self, var: ast::Ident, value: impl Into<Value>) {
-        let value = value.into();
+    #[tracing::instrument(skip_all)]
+    pub fn define(&mut self, var: ast::Ident, value: impl IntoValue) {
+        let value = value.into_value();
         if self.traced == Some(var.span()) {
             self.vt.tracer.trace(value.clone());
         }
@@ -213,6 +244,7 @@ impl<'a> Vm<'a> {
 
     /// Resolve a user-entered path to be relative to the compilation
     /// environment's root.
+    #[tracing::instrument(skip_all)]
     pub fn locate(&self, path: &str) -> StrResult<PathBuf> {
         if !self.location.is_detached() {
             if let Some(path) = path.strip_prefix('/') {
@@ -224,13 +256,13 @@ impl<'a> Vm<'a> {
             }
         }
 
-        Err("cannot access file system from here".into())
+        bail!("cannot access file system from here")
     }
 }
 
 /// A control flow event that occurred during evaluation.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Flow {
+pub enum FlowEvent {
     /// Stop iteration in a loop.
     Break(Span),
     /// Skip the remainder of the current iteration in a loop.
@@ -240,7 +272,7 @@ pub enum Flow {
     Return(Span, Option<Value>),
 }
 
-impl Flow {
+impl FlowEvent {
     /// Return an error stating that this control flow is forbidden.
     pub fn forbidden(&self) -> SourceError {
         match *self {
@@ -259,38 +291,49 @@ impl Flow {
 
 /// A route of source ids.
 #[derive(Default)]
-pub struct Route {
-    parent: Option<Tracked<'static, Self>>,
+pub struct Route<'a> {
+    // We need to override the constraint's lifetime here so that `Tracked` is
+    // covariant over the constraint. If it becomes invariant, we're in for a
+    // world of lifetime pain.
+    outer: Option<Tracked<'a, Self, <Route<'static> as Validate>::Constraint>>,
     id: Option<SourceId>,
 }
 
-impl Route {
+impl<'a> Route<'a> {
     /// Create a new route with just one entry.
     pub fn new(id: SourceId) -> Self {
-        Self { id: Some(id), parent: None }
+        Self { id: Some(id), outer: None }
     }
 
     /// Insert a new id into the route.
     ///
     /// You must guarantee that `outer` lives longer than the resulting
     /// route is ever used.
-    unsafe fn insert(outer: Tracked<Route>, id: SourceId) -> Route {
-        Route {
-            parent: Some(std::mem::transmute(outer)),
-            id: Some(id),
+    pub fn insert(outer: Tracked<'a, Self>, id: SourceId) -> Self {
+        Route { outer: Some(outer), id: Some(id) }
+    }
+
+    /// Start tracking this locator.
+    ///
+    /// In comparison to [`Track::track`], this method skips this chain link
+    /// if it does not contribute anything.
+    pub fn track(&self) -> Tracked<'_, Self> {
+        match self.outer {
+            Some(outer) if self.id.is_none() => outer,
+            _ => Track::track(self),
         }
     }
 }
 
 #[comemo::track]
-impl Route {
+impl<'a> Route<'a> {
     /// Whether the given id is part of the route.
     fn contains(&self, id: SourceId) -> bool {
-        self.id == Some(id) || self.parent.map_or(false, |parent| parent.contains(id))
+        self.id == Some(id) || self.outer.map_or(false, |outer| outer.contains(id))
     }
 }
 
-/// Traces which values existed for the expression at a span.
+/// Traces which values existed for an expression at a span.
 #[derive(Default, Clone)]
 pub struct Tracer {
     span: Option<Span>,
@@ -402,6 +445,7 @@ fn eval_markup(
 impl Eval for ast::Expr {
     type Output = Value;
 
+    #[tracing::instrument(name = "Expr::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let span = self.span();
         let forbidden = |name| {
@@ -433,6 +477,7 @@ impl Eval for ast::Expr {
             Self::MathDelimited(v) => v.eval(vm).map(Value::Content),
             Self::MathAttach(v) => v.eval(vm).map(Value::Content),
             Self::MathFrac(v) => v.eval(vm).map(Value::Content),
+            Self::MathRoot(v) => v.eval(vm).map(Value::Content),
             Self::Ident(v) => v.eval(vm),
             Self::None(v) => v.eval(vm),
             Self::Auto(v) => v.eval(vm),
@@ -452,6 +497,7 @@ impl Eval for ast::Expr {
             Self::Unary(v) => v.eval(vm),
             Self::Binary(v) => v.eval(vm),
             Self::Let(v) => v.eval(vm),
+            Self::DestructAssign(v) => v.eval(vm),
             Self::Set(_) => bail!(forbidden("set")),
             Self::Show(_) => bail!(forbidden("show")),
             Self::Conditional(v) => v.eval(vm),
@@ -482,6 +528,7 @@ impl ast::Expr {
 impl Eval for ast::Text {
     type Output = Content;
 
+    #[tracing::instrument(name = "Text::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         Ok((vm.items.text)(self.get().clone()))
     }
@@ -490,6 +537,7 @@ impl Eval for ast::Text {
 impl Eval for ast::Space {
     type Output = Content;
 
+    #[tracing::instrument(name = "Space::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         Ok((vm.items.space)())
     }
@@ -498,6 +546,7 @@ impl Eval for ast::Space {
 impl Eval for ast::Linebreak {
     type Output = Content;
 
+    #[tracing::instrument(name = "Linebreak::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         Ok((vm.items.linebreak)())
     }
@@ -506,6 +555,7 @@ impl Eval for ast::Linebreak {
 impl Eval for ast::Parbreak {
     type Output = Content;
 
+    #[tracing::instrument(name = "Parbreak::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         Ok((vm.items.parbreak)())
     }
@@ -514,6 +564,7 @@ impl Eval for ast::Parbreak {
 impl Eval for ast::Escape {
     type Output = Value;
 
+    #[tracing::instrument(name = "Escape::eval", skip_all)]
     fn eval(&self, _: &mut Vm) -> SourceResult<Self::Output> {
         Ok(Value::Symbol(Symbol::new(self.get())))
     }
@@ -522,6 +573,7 @@ impl Eval for ast::Escape {
 impl Eval for ast::Shorthand {
     type Output = Value;
 
+    #[tracing::instrument(name = "Shorthand::eval", skip_all)]
     fn eval(&self, _: &mut Vm) -> SourceResult<Self::Output> {
         Ok(Value::Symbol(Symbol::new(self.get())))
     }
@@ -530,6 +582,7 @@ impl Eval for ast::Shorthand {
 impl Eval for ast::SmartQuote {
     type Output = Content;
 
+    #[tracing::instrument(name = "SmartQuote::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         Ok((vm.items.smart_quote)(self.double()))
     }
@@ -538,6 +591,7 @@ impl Eval for ast::SmartQuote {
 impl Eval for ast::Strong {
     type Output = Content;
 
+    #[tracing::instrument(name = "Strong::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         Ok((vm.items.strong)(self.body().eval(vm)?))
     }
@@ -546,6 +600,7 @@ impl Eval for ast::Strong {
 impl Eval for ast::Emph {
     type Output = Content;
 
+    #[tracing::instrument(name = "Emph::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         Ok((vm.items.emph)(self.body().eval(vm)?))
     }
@@ -554,6 +609,7 @@ impl Eval for ast::Emph {
 impl Eval for ast::Raw {
     type Output = Content;
 
+    #[tracing::instrument(name = "Raw::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let text = self.text();
         let lang = self.lang().map(Into::into);
@@ -565,6 +621,7 @@ impl Eval for ast::Raw {
 impl Eval for ast::Link {
     type Output = Content;
 
+    #[tracing::instrument(name = "Link::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         Ok((vm.items.link)(self.get().clone()))
     }
@@ -573,6 +630,7 @@ impl Eval for ast::Link {
 impl Eval for ast::Label {
     type Output = Value;
 
+    #[tracing::instrument(name = "Label::eval", skip_all)]
     fn eval(&self, _: &mut Vm) -> SourceResult<Self::Output> {
         Ok(Value::Label(Label(self.get().into())))
     }
@@ -581,6 +639,7 @@ impl Eval for ast::Label {
 impl Eval for ast::Ref {
     type Output = Content;
 
+    #[tracing::instrument(name = "Ref::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let label = Label(self.target().into());
         let supplement = self.supplement().map(|block| block.eval(vm)).transpose()?;
@@ -591,6 +650,7 @@ impl Eval for ast::Ref {
 impl Eval for ast::Heading {
     type Output = Content;
 
+    #[tracing::instrument(name = "Heading::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let level = self.level();
         let body = self.body().eval(vm)?;
@@ -601,6 +661,7 @@ impl Eval for ast::Heading {
 impl Eval for ast::ListItem {
     type Output = Content;
 
+    #[tracing::instrument(name = "ListItem::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         Ok((vm.items.list_item)(self.body().eval(vm)?))
     }
@@ -609,6 +670,7 @@ impl Eval for ast::ListItem {
 impl Eval for ast::EnumItem {
     type Output = Content;
 
+    #[tracing::instrument(name = "EnumItem::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let number = self.number();
         let body = self.body().eval(vm)?;
@@ -619,6 +681,7 @@ impl Eval for ast::EnumItem {
 impl Eval for ast::TermItem {
     type Output = Content;
 
+    #[tracing::instrument(name = "TermItem::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let term = self.term().eval(vm)?;
         let description = self.description().eval(vm)?;
@@ -629,6 +692,7 @@ impl Eval for ast::TermItem {
 impl Eval for ast::Equation {
     type Output = Content;
 
+    #[tracing::instrument(name = "Equation::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let body = self.body().eval(vm)?;
         let block = self.block();
@@ -639,6 +703,7 @@ impl Eval for ast::Equation {
 impl Eval for ast::Math {
     type Output = Content;
 
+    #[tracing::instrument(name = "Math::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         Ok(Content::sequence(
             self.exprs()
@@ -651,14 +716,16 @@ impl Eval for ast::Math {
 impl Eval for ast::MathIdent {
     type Output = Value;
 
+    #[tracing::instrument(name = "MathIdent::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
-        Ok(vm.scopes.get_in_math(self).cloned().at(self.span())?)
+        vm.scopes.get_in_math(self).cloned().at(self.span())
     }
 }
 
 impl Eval for ast::MathAlignPoint {
     type Output = Content;
 
+    #[tracing::instrument(name = "MathAlignPoint::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         Ok((vm.items.math_align_point)())
     }
@@ -667,6 +734,7 @@ impl Eval for ast::MathAlignPoint {
 impl Eval for ast::MathDelimited {
     type Output = Content;
 
+    #[tracing::instrument(name = "MathDelimited::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let open = self.open().eval_display(vm)?;
         let body = self.body().eval(vm)?;
@@ -678,17 +746,19 @@ impl Eval for ast::MathDelimited {
 impl Eval for ast::MathAttach {
     type Output = Content;
 
+    #[tracing::instrument(name = "MathAttach::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let base = self.base().eval_display(vm)?;
-        let bottom = self.bottom().map(|expr| expr.eval_display(vm)).transpose()?;
         let top = self.top().map(|expr| expr.eval_display(vm)).transpose()?;
-        Ok((vm.items.math_attach)(base, bottom, top))
+        let bottom = self.bottom().map(|expr| expr.eval_display(vm)).transpose()?;
+        Ok((vm.items.math_attach)(base, top, bottom, None, None, None, None))
     }
 }
 
 impl Eval for ast::MathFrac {
     type Output = Content;
 
+    #[tracing::instrument(name = "MathFrac::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let num = self.num().eval_display(vm)?;
         let denom = self.denom().eval_display(vm)?;
@@ -696,17 +766,29 @@ impl Eval for ast::MathFrac {
     }
 }
 
+impl Eval for ast::MathRoot {
+    type Output = Content;
+
+    fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
+        let index = self.index().map(|i| (vm.items.text)(eco_format!("{i}")));
+        let radicand = self.radicand().eval_display(vm)?;
+        Ok((vm.items.math_root)(index, radicand))
+    }
+}
+
 impl Eval for ast::Ident {
     type Output = Value;
 
+    #[tracing::instrument(name = "Ident::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
-        Ok(vm.scopes.get(self).cloned().at(self.span())?)
+        vm.scopes.get(self).cloned().at(self.span())
     }
 }
 
 impl Eval for ast::None {
     type Output = Value;
 
+    #[tracing::instrument(name = "None::eval", skip_all)]
     fn eval(&self, _: &mut Vm) -> SourceResult<Self::Output> {
         Ok(Value::None)
     }
@@ -715,6 +797,7 @@ impl Eval for ast::None {
 impl Eval for ast::Auto {
     type Output = Value;
 
+    #[tracing::instrument(name = "Auto::eval", skip_all)]
     fn eval(&self, _: &mut Vm) -> SourceResult<Self::Output> {
         Ok(Value::Auto)
     }
@@ -723,6 +806,7 @@ impl Eval for ast::Auto {
 impl Eval for ast::Bool {
     type Output = Value;
 
+    #[tracing::instrument(name = "Bool::eval", skip_all)]
     fn eval(&self, _: &mut Vm) -> SourceResult<Self::Output> {
         Ok(Value::Bool(self.get()))
     }
@@ -731,6 +815,7 @@ impl Eval for ast::Bool {
 impl Eval for ast::Int {
     type Output = Value;
 
+    #[tracing::instrument(name = "Int::eval", skip_all)]
     fn eval(&self, _: &mut Vm) -> SourceResult<Self::Output> {
         Ok(Value::Int(self.get()))
     }
@@ -739,6 +824,7 @@ impl Eval for ast::Int {
 impl Eval for ast::Float {
     type Output = Value;
 
+    #[tracing::instrument(name = "Float::eval", skip_all)]
     fn eval(&self, _: &mut Vm) -> SourceResult<Self::Output> {
         Ok(Value::Float(self.get()))
     }
@@ -747,6 +833,7 @@ impl Eval for ast::Float {
 impl Eval for ast::Numeric {
     type Output = Value;
 
+    #[tracing::instrument(name = "Numeric::eval", skip_all)]
     fn eval(&self, _: &mut Vm) -> SourceResult<Self::Output> {
         Ok(Value::numeric(self.get()))
     }
@@ -755,6 +842,7 @@ impl Eval for ast::Numeric {
 impl Eval for ast::Str {
     type Output = Value;
 
+    #[tracing::instrument(name = "Str::eval", skip_all)]
     fn eval(&self, _: &mut Vm) -> SourceResult<Self::Output> {
         Ok(Value::Str(self.get().into()))
     }
@@ -763,6 +851,7 @@ impl Eval for ast::Str {
 impl Eval for ast::CodeBlock {
     type Output = Value;
 
+    #[tracing::instrument(name = "CodeBlock::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         vm.scopes.enter();
         let output = self.body().eval(vm)?;
@@ -828,6 +917,7 @@ fn eval_code(
 impl Eval for ast::ContentBlock {
     type Output = Content;
 
+    #[tracing::instrument(name = "ContentBlock::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         vm.scopes.enter();
         let content = self.body().eval(vm)?;
@@ -839,6 +929,7 @@ impl Eval for ast::ContentBlock {
 impl Eval for ast::Parenthesized {
     type Output = Value;
 
+    #[tracing::instrument(name = "Parenthesized::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         self.expr().eval(vm)
     }
@@ -847,6 +938,7 @@ impl Eval for ast::Parenthesized {
 impl Eval for ast::Array {
     type Output = Array;
 
+    #[tracing::instrument(skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let items = self.items();
 
@@ -862,15 +954,16 @@ impl Eval for ast::Array {
             }
         }
 
-        Ok(Array::from_vec(vec))
+        Ok(vec.into())
     }
 }
 
 impl Eval for ast::Dict {
     type Output = Dict;
 
+    #[tracing::instrument(skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
-        let mut map = BTreeMap::new();
+        let mut map = indexmap::IndexMap::new();
 
         for item in self.items() {
             match item {
@@ -892,13 +985,14 @@ impl Eval for ast::Dict {
             }
         }
 
-        Ok(Dict::from_map(map))
+        Ok(map.into())
     }
 }
 
 impl Eval for ast::Unary {
     type Output = Value;
 
+    #[tracing::instrument(name = "Unary::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let value = self.expr().eval(vm)?;
         let result = match self.op() {
@@ -913,6 +1007,7 @@ impl Eval for ast::Unary {
 impl Eval for ast::Binary {
     type Output = Value;
 
+    #[tracing::instrument(name = "Binary::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         match self.op() {
             ast::BinOp::Add => self.apply(vm, ops::add),
@@ -987,6 +1082,7 @@ impl ast::Binary {
 impl Eval for ast::FieldAccess {
     type Output = Value;
 
+    #[tracing::instrument(name = "FieldAccess::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let value = self.target().eval(vm)?;
         let field = self.field();
@@ -997,6 +1093,7 @@ impl Eval for ast::FieldAccess {
 impl Eval for ast::FuncCall {
     type Output = Value;
 
+    #[tracing::instrument(name = "FuncCall::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let span = self.span();
         if vm.depth >= MAX_CALL_DEPTH {
@@ -1019,7 +1116,15 @@ impl Eval for ast::FuncCall {
             if methods::is_mutating(&field) {
                 let args = args.eval(vm)?;
                 let target = target.access(vm)?;
-                if !matches!(target, Value::Symbol(_) | Value::Module(_)) {
+
+                // Prioritize a function's own methods (with, where) over its
+                // fields. This is fine as we define each field of a function,
+                // if it has any.
+                // ('methods_on' will be empty for Symbol and Module - their
+                // method calls always refer to their fields.)
+                if !matches!(target, Value::Symbol(_) | Value::Module(_) | Value::Func(_))
+                    || methods_on(target.type_name()).iter().any(|(m, _)| m == &field)
+                {
                     return methods::call_mut(target, &field, args, span).trace(
                         vm.world(),
                         point,
@@ -1030,7 +1135,10 @@ impl Eval for ast::FuncCall {
             } else {
                 let target = target.eval(vm)?;
                 let args = args.eval(vm)?;
-                if !matches!(target, Value::Symbol(_) | Value::Module(_)) {
+
+                if !matches!(target, Value::Symbol(_) | Value::Module(_) | Value::Func(_))
+                    || methods_on(target.type_name()).iter().any(|(m, _)| m == &field)
+                {
                     return methods::call(vm, target, &field, args, span).trace(
                         vm.world(),
                         point,
@@ -1074,7 +1182,14 @@ impl Eval for ast::FuncCall {
 
         let callee = callee.cast::<Func>().at(callee_span)?;
         let point = || Tracepoint::Call(callee.name().map(Into::into));
-        callee.call_vm(vm, args).trace(vm.world(), point, span)
+        let f = || callee.call_vm(vm, args).trace(vm.world(), point, span);
+
+        // Stacker is broken on WASM.
+        #[cfg(target_arch = "wasm32")]
+        return f();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        stacker::maybe_grow(32 * 1024, 2 * 1024 * 1024, f)
     }
 }
 
@@ -1138,6 +1253,7 @@ impl Eval for ast::Args {
 impl Eval for ast::Closure {
     type Output = Value;
 
+    #[tracing::instrument(name = "Closure::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         // The closure's name is defined by its let binding if there's one.
         let name = self.name();
@@ -1149,24 +1265,15 @@ impl Eval for ast::Closure {
             visitor.finish()
         };
 
-        let mut params = Vec::new();
-        let mut sink = None;
-
         // Collect parameters and an optional sink parameter.
+        let mut params = Vec::new();
         for param in self.params().children() {
             match param {
-                ast::Param::Pos(name) => {
-                    params.push((name, None));
-                }
+                ast::Param::Pos(pattern) => params.push(Param::Pos(pattern)),
                 ast::Param::Named(named) => {
-                    params.push((named.name(), Some(named.expr().eval(vm)?)));
+                    params.push(Param::Named(named.name(), named.expr().eval(vm)?));
                 }
-                ast::Param::Sink(name) => {
-                    if sink.is_some() {
-                        bail!(name.span(), "only one argument sink is allowed");
-                    }
-                    sink = Some(name);
-                }
+                ast::Param::Sink(spread) => params.push(Param::Sink(spread.name())),
             }
         }
 
@@ -1176,7 +1283,6 @@ impl Eval for ast::Closure {
             name,
             captured,
             params,
-            sink,
             body: self.body(),
         };
 
@@ -1184,15 +1290,178 @@ impl Eval for ast::Closure {
     }
 }
 
+impl ast::Pattern {
+    fn destruct_array<F>(
+        &self,
+        vm: &mut Vm,
+        value: Array,
+        f: F,
+        destruct: &ast::Destructuring,
+    ) -> SourceResult<Value>
+    where
+        F: Fn(&mut Vm, ast::Expr, Value) -> SourceResult<Value>,
+    {
+        let mut i = 0;
+        let len = value.as_slice().len();
+        for p in destruct.bindings() {
+            match p {
+                ast::DestructuringKind::Normal(expr) => {
+                    let Ok(v) = value.at(i as i64, None) else {
+                        bail!(expr.span(), "not enough elements to destructure");
+                    };
+                    f(vm, expr, v.clone())?;
+                    i += 1;
+                }
+                ast::DestructuringKind::Sink(spread) => {
+                    let sink_size = (1 + len).checked_sub(destruct.bindings().count());
+                    let sink = sink_size.and_then(|s| value.as_slice().get(i..i + s));
+                    if let (Some(sink_size), Some(sink)) = (sink_size, sink) {
+                        if let Some(expr) = spread.expr() {
+                            f(vm, expr, Value::Array(sink.into()))?;
+                        }
+                        i += sink_size;
+                    } else {
+                        bail!(self.span(), "not enough elements to destructure")
+                    }
+                }
+                ast::DestructuringKind::Named(named) => {
+                    bail!(named.span(), "cannot destructure named elements from an array")
+                }
+                ast::DestructuringKind::Placeholder(underscore) => {
+                    if i < len {
+                        i += 1
+                    } else {
+                        bail!(underscore.span(), "not enough elements to destructure")
+                    }
+                }
+            }
+        }
+        if i < len {
+            bail!(self.span(), "too many elements to destructure");
+        }
+
+        Ok(Value::None)
+    }
+
+    fn destruct_dict<F>(
+        &self,
+        vm: &mut Vm,
+        dict: Dict,
+        f: F,
+        destruct: &ast::Destructuring,
+    ) -> SourceResult<Value>
+    where
+        F: Fn(&mut Vm, ast::Expr, Value) -> SourceResult<Value>,
+    {
+        let mut sink = None;
+        let mut used = HashSet::new();
+        for p in destruct.bindings() {
+            match p {
+                ast::DestructuringKind::Normal(ast::Expr::Ident(ident)) => {
+                    let v = dict
+                        .at(&ident, None)
+                        .map_err(|_| "destructuring key not found in dictionary")
+                        .at(ident.span())?;
+                    f(vm, ast::Expr::Ident(ident.clone()), v.clone())?;
+                    used.insert(ident.take());
+                }
+                ast::DestructuringKind::Sink(spread) => sink = spread.expr(),
+                ast::DestructuringKind::Named(named) => {
+                    let name = named.name();
+                    let v = dict
+                        .at(&name, None)
+                        .map_err(|_| "destructuring key not found in dictionary")
+                        .at(name.span())?;
+                    f(vm, named.expr(), v.clone())?;
+                    used.insert(name.take());
+                }
+                ast::DestructuringKind::Placeholder(_) => {}
+                ast::DestructuringKind::Normal(expr) => {
+                    bail!(expr.span(), "expected key, found expression");
+                }
+            }
+        }
+
+        if let Some(expr) = sink {
+            let mut sink = Dict::new();
+            for (key, value) in dict {
+                if !used.contains(key.as_str()) {
+                    sink.insert(key, value);
+                }
+            }
+            f(vm, expr, Value::Dict(sink))?;
+        }
+
+        Ok(Value::None)
+    }
+
+    /// Destruct the given value into the pattern and apply the function to each binding.
+    #[tracing::instrument(skip_all)]
+    fn apply<T>(&self, vm: &mut Vm, value: Value, f: T) -> SourceResult<Value>
+    where
+        T: Fn(&mut Vm, ast::Expr, Value) -> SourceResult<Value>,
+    {
+        match self {
+            ast::Pattern::Normal(expr) => {
+                f(vm, expr.clone(), value)?;
+                Ok(Value::None)
+            }
+            ast::Pattern::Placeholder(_) => Ok(Value::None),
+            ast::Pattern::Destructuring(destruct) => match value {
+                Value::Array(value) => self.destruct_array(vm, value, f, destruct),
+                Value::Dict(value) => self.destruct_dict(vm, value, f, destruct),
+                _ => bail!(self.span(), "cannot destructure {}", value.type_name()),
+            },
+        }
+    }
+
+    /// Destruct the value into the pattern by binding.
+    pub fn define(&self, vm: &mut Vm, value: Value) -> SourceResult<Value> {
+        self.apply(vm, value, |vm, expr, value| match expr {
+            ast::Expr::Ident(ident) => {
+                vm.define(ident, value);
+                Ok(Value::None)
+            }
+            _ => bail!(expr.span(), "nested patterns are currently not supported"),
+        })
+    }
+
+    /// Destruct the value into the pattern by assignment.
+    pub fn assign(&self, vm: &mut Vm, value: Value) -> SourceResult<Value> {
+        self.apply(vm, value, |vm, expr, value| {
+            let location = expr.access(vm)?;
+            *location = value;
+            Ok(Value::None)
+        })
+    }
+}
+
 impl Eval for ast::LetBinding {
     type Output = Value;
 
+    #[tracing::instrument(name = "LetBinding::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let value = match self.init() {
             Some(expr) => expr.eval(vm)?,
             None => Value::None,
         };
-        vm.define(self.binding(), value);
+
+        match self.kind() {
+            ast::LetBindingKind::Normal(pattern) => pattern.define(vm, value),
+            ast::LetBindingKind::Closure(ident) => {
+                vm.define(ident, value);
+                Ok(Value::None)
+            }
+        }
+    }
+}
+
+impl Eval for ast::DestructAssignment {
+    type Output = Value;
+
+    fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
+        let value = self.value().eval(vm)?;
+        self.pattern().assign(vm, value)?;
         Ok(Value::None)
     }
 }
@@ -1228,8 +1497,9 @@ impl Eval for ast::ShowRule {
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let selector = self
             .selector()
-            .map(|sel| sel.eval(vm)?.cast::<Selector>().at(sel.span()))
-            .transpose()?;
+            .map(|sel| sel.eval(vm)?.cast::<ShowableSelector>().at(sel.span()))
+            .transpose()?
+            .map(|selector| selector.0);
 
         let transform = self.transform();
         let span = transform.span();
@@ -1246,6 +1516,7 @@ impl Eval for ast::ShowRule {
 impl Eval for ast::Conditional {
     type Output = Value;
 
+    #[tracing::instrument(name = "Conditional::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let condition = self.condition();
         if condition.eval(vm)?.cast::<bool>().at(condition.span())? {
@@ -1261,6 +1532,7 @@ impl Eval for ast::Conditional {
 impl Eval for ast::WhileLoop {
     type Output = Value;
 
+    #[tracing::instrument(name = "WhileLoop::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let flow = vm.flow.take();
         let mut output = Value::None;
@@ -1283,12 +1555,12 @@ impl Eval for ast::WhileLoop {
             output = ops::join(output, value).at(body.span())?;
 
             match vm.flow {
-                Some(Flow::Break(_)) => {
+                Some(FlowEvent::Break(_)) => {
                     vm.flow = None;
                     break;
                 }
-                Some(Flow::Continue(_)) => vm.flow = None,
-                Some(Flow::Return(..)) => break,
+                Some(FlowEvent::Continue(_)) => vm.flow = None,
+                Some(FlowEvent::Return(..)) => break,
                 None => {}
             }
 
@@ -1328,29 +1600,30 @@ fn can_diverge(expr: &SyntaxNode) -> bool {
 impl Eval for ast::ForLoop {
     type Output = Value;
 
+    #[tracing::instrument(name = "ForLoop::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let flow = vm.flow.take();
         let mut output = Value::None;
 
         macro_rules! iter {
-            (for ($($binding:ident => $value:ident),*) in $iter:expr) => {{
+            (for $pat:ident in $iter:expr) => {{
                 vm.scopes.enter();
 
                 #[allow(unused_parens)]
-                for ($($value),*) in $iter {
-                    $(vm.define($binding.clone(), $value);)*
+                for value in $iter {
+                    $pat.define(vm, value.into_value())?;
 
                     let body = self.body();
                     let value = body.eval(vm)?;
                     output = ops::join(output, value).at(body.span())?;
 
                     match vm.flow {
-                        Some(Flow::Break(_)) => {
+                        Some(FlowEvent::Break(_)) => {
                             vm.flow = None;
                             break;
                         }
-                        Some(Flow::Continue(_)) => vm.flow = None,
-                        Some(Flow::Return(..)) => break,
+                        Some(FlowEvent::Continue(_)) => vm.flow = None,
+                        Some(FlowEvent::Return(..)) => break,
                         None => {}
                     }
                 }
@@ -1361,39 +1634,25 @@ impl Eval for ast::ForLoop {
 
         let iter = self.iter().eval(vm)?;
         let pattern = self.pattern();
-        let key = pattern.key();
-        let value = pattern.value();
 
-        match (key, value, iter) {
-            (None, v, Value::Str(string)) => {
-                iter!(for (v => value) in string.as_str().graphemes(true));
+        match (&pattern, iter.clone()) {
+            (ast::Pattern::Normal(_), Value::Str(string)) => {
+                // Iterate over graphemes of string.
+                iter!(for pattern in string.as_str().graphemes(true));
             }
-            (None, v, Value::Array(array)) => {
-                iter!(for (v => value) in array.into_iter());
+            (_, Value::Dict(dict)) => {
+                // Iterate over pairs of dict.
+                iter!(for pattern in dict.pairs());
             }
-            (Some(i), v, Value::Array(array)) => {
-                iter!(for (i => idx, v => value) in array.into_iter().enumerate());
+            (_, Value::Array(array)) => {
+                // Iterate over values of array.
+                iter!(for pattern in array);
             }
-            (None, v, Value::Dict(dict)) => {
-                iter!(for (v => value) in dict.into_iter().map(|p| p.1));
-            }
-            (Some(k), v, Value::Dict(dict)) => {
-                iter!(for (k => key, v => value) in dict.into_iter());
-            }
-            (None, v, Value::Args(args)) => {
-                iter!(for (v => value) in args.items.into_iter()
-                    .filter(|arg| arg.name.is_none())
-                    .map(|arg| arg.value.v));
-            }
-            (Some(k), v, Value::Args(args)) => {
-                iter!(for (k => key, v => value) in args.items.into_iter()
-                    .map(|arg| (arg.name.map_or(Value::None, Value::Str), arg.value.v)));
-            }
-            (_, _, Value::Str(_)) => {
-                bail!(pattern.span(), "mismatched pattern");
-            }
-            (_, _, iter) => {
+            (ast::Pattern::Normal(_), _) => {
                 bail!(self.iter().span(), "cannot loop over {}", iter.type_name());
+            }
+            (_, _) => {
+                bail!(pattern.span(), "cannot destructure values of {}", iter.type_name())
             }
         }
 
@@ -1405,36 +1664,69 @@ impl Eval for ast::ForLoop {
     }
 }
 
+/// Applies imports from `import` to the current scope.
+fn apply_imports<V: IntoValue>(
+    imports: Option<ast::Imports>,
+    vm: &mut Vm,
+    source_value: V,
+    name: impl Fn(&V) -> EcoString,
+    scope: impl Fn(&V) -> &Scope,
+) -> SourceResult<()> {
+    match imports {
+        None => {
+            vm.scopes.top.define(name(&source_value), source_value);
+        }
+        Some(ast::Imports::Wildcard) => {
+            for (var, value) in scope(&source_value).iter() {
+                vm.scopes.top.define(var.clone(), value.clone());
+            }
+        }
+        Some(ast::Imports::Items(idents)) => {
+            let mut errors = vec![];
+            let scope = scope(&source_value);
+            for ident in idents {
+                if let Some(value) = scope.get(&ident) {
+                    vm.define(ident, value.clone());
+                } else {
+                    errors.push(error!(ident.span(), "unresolved import"));
+                }
+            }
+            if !errors.is_empty() {
+                return Err(Box::new(errors));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 impl Eval for ast::ModuleImport {
     type Output = Value;
 
+    #[tracing::instrument(name = "ModuleImport::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let span = self.source().span();
         let source = self.source().eval(vm)?;
-        let module = import(vm, source, span)?;
-
-        match self.imports() {
-            None => {
-                vm.scopes.top.define(module.name().clone(), module);
+        if let Value::Func(func) = source {
+            if func.info().is_none() {
+                bail!(span, "cannot import from user-defined functions");
             }
-            Some(ast::Imports::Wildcard) => {
-                for (var, value) in module.scope().iter() {
-                    vm.scopes.top.define(var.clone(), value.clone());
-                }
-            }
-            Some(ast::Imports::Items(idents)) => {
-                let mut errors = vec![];
-                for ident in idents {
-                    if let Some(value) = module.scope().get(&ident) {
-                        vm.define(ident, value.clone());
-                    } else {
-                        errors.push(error!(ident.span(), "unresolved import"));
-                    }
-                }
-                if !errors.is_empty() {
-                    return Err(Box::new(errors));
-                }
-            }
+            apply_imports(
+                self.imports(),
+                vm,
+                func,
+                |func| func.info().unwrap().name.into(),
+                |func| &func.info().unwrap().scope,
+            )?;
+        } else {
+            let module = import(vm, source, span, true)?;
+            apply_imports(
+                self.imports(),
+                vm,
+                module,
+                |module| module.name().clone(),
+                |module| module.scope(),
+            )?;
         }
 
         Ok(Value::None)
@@ -1444,20 +1736,32 @@ impl Eval for ast::ModuleImport {
 impl Eval for ast::ModuleInclude {
     type Output = Content;
 
+    #[tracing::instrument(name = "ModuleInclude::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let span = self.source().span();
         let source = self.source().eval(vm)?;
-        let module = import(vm, source, span)?;
+        let module = import(vm, source, span, false)?;
         Ok(module.content())
     }
 }
 
 /// Process an import of a module relative to the current location.
-fn import(vm: &mut Vm, source: Value, span: Span) -> SourceResult<Module> {
+fn import(
+    vm: &mut Vm,
+    source: Value,
+    span: Span,
+    accept_functions: bool,
+) -> SourceResult<Module> {
     let path = match source {
         Value::Str(path) => path,
         Value::Module(module) => return Ok(module),
-        v => bail!(span, "expected path or module, found {}", v.type_name()),
+        v => {
+            if accept_functions {
+                bail!(span, "expected path, module or function, found {}", v.type_name())
+            } else {
+                bail!(span, "expected path or module, found {}", v.type_name())
+            }
+        }
     };
 
     // Load the source file.
@@ -1480,9 +1784,10 @@ fn import(vm: &mut Vm, source: Value, span: Span) -> SourceResult<Module> {
 impl Eval for ast::LoopBreak {
     type Output = Value;
 
+    #[tracing::instrument(name = "LoopBreak::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         if vm.flow.is_none() {
-            vm.flow = Some(Flow::Break(self.span()));
+            vm.flow = Some(FlowEvent::Break(self.span()));
         }
         Ok(Value::None)
     }
@@ -1491,9 +1796,10 @@ impl Eval for ast::LoopBreak {
 impl Eval for ast::LoopContinue {
     type Output = Value;
 
+    #[tracing::instrument(name = "LoopContinue::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         if vm.flow.is_none() {
-            vm.flow = Some(Flow::Continue(self.span()));
+            vm.flow = Some(FlowEvent::Continue(self.span()));
         }
         Ok(Value::None)
     }
@@ -1502,10 +1808,11 @@ impl Eval for ast::LoopContinue {
 impl Eval for ast::FuncReturn {
     type Output = Value;
 
+    #[tracing::instrument(name = "FuncReturn::eval", skip_all)]
     fn eval(&self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let value = self.body().map(|body| body.eval(vm)).transpose()?;
         if vm.flow.is_none() {
-            vm.flow = Some(Flow::Return(self.span(), value));
+            vm.flow = Some(FlowEvent::Return(self.span(), value));
         }
         Ok(Value::None)
     }

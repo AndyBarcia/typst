@@ -90,6 +90,15 @@ impl MathFragment {
         }
     }
 
+    pub fn set_limits(&mut self, limits: Limits) {
+        match self {
+            Self::Glyph(glyph) => glyph.limits = limits,
+            Self::Variant(variant) => variant.limits = limits,
+            Self::Frame(fragment) => fragment.limits = limits,
+            _ => {}
+        }
+    }
+
     pub fn is_spaced(&self) -> bool {
         match self {
             MathFragment::Frame(frame) => frame.spaced,
@@ -105,12 +114,21 @@ impl MathFragment {
         }
     }
 
-    pub fn to_frame(self) -> Frame {
+    pub fn into_frame(self) -> Frame {
         match self {
-            Self::Glyph(glyph) => glyph.to_frame(),
+            Self::Glyph(glyph) => glyph.into_frame(),
             Self::Variant(variant) => variant.frame,
             Self::Frame(fragment) => fragment.frame,
             _ => Frame::new(self.size()),
+        }
+    }
+
+    pub fn limits(&self) -> Limits {
+        match self {
+            MathFragment::Glyph(glyph) => glyph.limits,
+            MathFragment::Variant(variant) => variant.limits,
+            MathFragment::Frame(fragment) => fragment.limits,
+            _ => Limits::Never,
         }
     }
 }
@@ -148,6 +166,8 @@ pub struct GlyphFragment {
     pub font_size: Abs,
     pub class: Option<MathClass>,
     pub span: Span,
+    pub meta: Vec<Meta>,
+    pub limits: Limits,
 }
 
 impl GlyphFragment {
@@ -163,6 +183,34 @@ impl GlyphFragment {
     }
 
     pub fn with_id(ctx: &MathContext, c: char, id: GlyphId, span: Span) -> Self {
+        let class = match c {
+            ':' => Some(MathClass::Relation),
+            _ => unicode_math_class::class(c),
+        };
+        let mut fragment = Self {
+            id,
+            c,
+            font: ctx.font.clone(),
+            lang: TextElem::lang_in(ctx.styles()),
+            fill: TextElem::fill_in(ctx.styles()),
+            style: ctx.style,
+            font_size: ctx.size,
+            width: Abs::zero(),
+            ascent: Abs::zero(),
+            descent: Abs::zero(),
+            limits: Limits::for_char(c),
+            italics_correction: Abs::zero(),
+            class,
+            span,
+            meta: MetaElem::data_in(ctx.styles()),
+        };
+        fragment.set_id(ctx, id);
+        fragment
+    }
+
+    /// Sets element id and boxes in appropriate way without changing other
+    /// styles. This is used to replace the glyph with a stretch variant.
+    pub fn set_id(&mut self, ctx: &MathContext, id: GlyphId) {
         let advance = ctx.ttf.glyph_hor_advance(id).unwrap_or_default();
         let italics = italics_correction(ctx, id).unwrap_or_default();
         let bbox = ctx.ttf.glyph_bounding_box(id).unwrap_or(Rect {
@@ -177,62 +225,51 @@ impl GlyphFragment {
             width += italics;
         }
 
-        Self {
-            id,
-            c,
-            font: ctx.font.clone(),
-            lang: TextElem::lang_in(ctx.styles()),
-            fill: TextElem::fill_in(ctx.styles()),
-            style: ctx.style,
-            font_size: ctx.size,
-            width,
-            ascent: bbox.y_max.scaled(ctx),
-            descent: -bbox.y_min.scaled(ctx),
-            italics_correction: italics,
-            class: match c {
-                ':' => Some(MathClass::Relation),
-                _ => unicode_math_class::class(c),
-            },
-            span,
-        }
+        self.id = id;
+        self.width = width;
+        self.ascent = bbox.y_max.scaled(ctx);
+        self.descent = -bbox.y_min.scaled(ctx);
+        self.italics_correction = italics;
     }
 
     pub fn height(&self) -> Abs {
         self.ascent + self.descent
     }
 
-    pub fn to_variant(&self) -> VariantFragment {
+    pub fn into_variant(self) -> VariantFragment {
         VariantFragment {
             c: self.c,
             id: Some(self.id),
-            frame: self.to_frame(),
             style: self.style,
             font_size: self.font_size,
             italics_correction: self.italics_correction,
             class: self.class,
             span: self.span,
+            limits: self.limits,
+            frame: self.into_frame(),
         }
     }
 
-    pub fn to_frame(&self) -> Frame {
+    pub fn into_frame(self) -> Frame {
         let item = TextItem {
             font: self.font.clone(),
             size: self.font_size,
             fill: self.fill,
             lang: self.lang,
+            text: self.c.into(),
             glyphs: vec![Glyph {
                 id: self.id.0,
-                c: self.c,
                 x_advance: Em::from_length(self.width, self.font_size),
                 x_offset: Em::zero(),
-                span: self.span,
-                offset: 0,
+                range: 0..self.c.len_utf8() as u16,
+                span: (self.span, 0),
             }],
         };
         let size = Size::new(self.width, self.ascent + self.descent);
         let mut frame = Frame::new(size);
         frame.set_baseline(self.ascent);
         frame.push(Point::with_y(self.ascent), FrameItem::Text(item));
+        frame.meta_iter(self.meta);
         frame
     }
 }
@@ -253,6 +290,7 @@ pub struct VariantFragment {
     pub font_size: Abs,
     pub class: Option<MathClass>,
     pub span: Span,
+    pub limits: Limits,
 }
 
 impl Debug for VariantFragment {
@@ -267,20 +305,21 @@ pub struct FrameFragment {
     pub style: MathStyle,
     pub font_size: Abs,
     pub class: MathClass,
-    pub limits: bool,
+    pub limits: Limits,
     pub spaced: bool,
     pub base_ascent: Abs,
 }
 
 impl FrameFragment {
-    pub fn new(ctx: &MathContext, frame: Frame) -> Self {
+    pub fn new(ctx: &MathContext, mut frame: Frame) -> Self {
         let base_ascent = frame.ascent();
+        frame.meta(ctx.styles(), false);
         Self {
             frame,
             font_size: ctx.size,
             style: ctx.style,
             class: MathClass::Normal,
-            limits: false,
+            limits: Limits::Never,
             spaced: false,
             base_ascent,
         }
@@ -290,7 +329,7 @@ impl FrameFragment {
         Self { class, ..self }
     }
 
-    pub fn with_limits(self, limits: bool) -> Self {
+    pub fn with_limits(self, limits: Limits) -> Self {
         Self { limits, ..self }
     }
 

@@ -5,13 +5,15 @@ use std::sync::Arc;
 
 use image::imageops::FilterType;
 use image::{GenericImageView, Rgba};
+use resvg::FitTo;
 use tiny_skia as sk;
 use ttf_parser::{GlyphId, OutlineBuilder};
-use usvg::FitTo;
+use usvg::{NodeExt, TreeParsing};
 
 use crate::doc::{Frame, FrameItem, GroupItem, Meta, TextItem};
 use crate::geom::{
-    self, Abs, Color, Geometry, Paint, PathItem, Shape, Size, Stroke, Transform,
+    self, Abs, Color, Geometry, LineCap, LineJoin, Paint, PathItem, Shape, Size, Stroke,
+    Transform,
 };
 use crate::image::{DecodedImage, Image};
 
@@ -37,7 +39,7 @@ pub fn render(frame: &Frame, pixel_per_pt: f32, fill: Color) -> sk::Pixmap {
 fn render_frame(
     canvas: &mut sk::Pixmap,
     ts: sk::Transform,
-    mask: Option<&sk::ClipMask>,
+    mask: Option<&sk::Mask>,
     frame: &Frame,
 ) {
     for (pos, item) in frame.items() {
@@ -61,6 +63,7 @@ fn render_frame(
             FrameItem::Meta(meta, _) => match meta {
                 Meta::Link(_) => {}
                 Meta::Elem(_) => {}
+                Meta::PageNumbering(_) => {}
                 Meta::Hide => {}
             },
         }
@@ -71,13 +74,13 @@ fn render_frame(
 fn render_group(
     canvas: &mut sk::Pixmap,
     ts: sk::Transform,
-    mask: Option<&sk::ClipMask>,
+    mask: Option<&sk::Mask>,
     group: &GroupItem,
 ) {
     let ts = ts.pre_concat(group.transform.into());
 
     let mut mask = mask;
-    let mut storage;
+    let storage;
     if group.clips {
         let size = group.frame.size();
         let w = size.x.to_f32();
@@ -86,21 +89,32 @@ fn render_group(
             .map(sk::PathBuilder::from_rect)
             .and_then(|path| path.transform(ts))
         {
-            let result = if let Some(mask) = mask {
-                storage = mask.clone();
-                storage.intersect_path(&path, sk::FillRule::default(), false)
+            if let Some(mask) = mask {
+                let mut mask = mask.clone();
+                mask.intersect_path(
+                    &path,
+                    sk::FillRule::default(),
+                    false,
+                    sk::Transform::default(),
+                );
+                storage = mask;
             } else {
                 let pxw = canvas.width();
                 let pxh = canvas.height();
-                storage = sk::ClipMask::new();
-                storage.set_path(pxw, pxh, &path, sk::FillRule::default(), false)
-            };
+                let Some(mut mask) = sk::Mask::new(pxw, pxh) else {
+                    // Fails if clipping rect is empty. In that case we just
+                    // clip everything by returning.
+                    return;
+                };
 
-            // Clipping fails if clipping rect is empty. In that case we just
-            // clip everything by returning.
-            if result.is_none() {
-                return;
-            }
+                mask.fill_path(
+                    &path,
+                    sk::FillRule::default(),
+                    false,
+                    sk::Transform::default(),
+                );
+                storage = mask;
+            };
 
             mask = Some(&storage);
         }
@@ -113,7 +127,7 @@ fn render_group(
 fn render_text(
     canvas: &mut sk::Pixmap,
     ts: sk::Transform,
-    mask: Option<&sk::ClipMask>,
+    mask: Option<&sk::Mask>,
     text: &TextItem,
 ) {
     let mut x = 0.0;
@@ -134,7 +148,7 @@ fn render_text(
 fn render_svg_glyph(
     canvas: &mut sk::Pixmap,
     ts: sk::Transform,
-    _: Option<&sk::ClipMask>,
+    mask: Option<&sk::Mask>,
     text: &TextItem,
     id: GlyphId,
 ) -> Option<()> {
@@ -155,8 +169,8 @@ fn render_svg_glyph(
 
     // Parse SVG.
     let opts = usvg::Options::default();
-    let tree = usvg::Tree::from_xmltree(&document, &opts.to_ref()).ok()?;
-    let view_box = tree.svg_node().view_box.rect;
+    let tree = usvg::Tree::from_xmltree(&document, &opts).ok()?;
+    let view_box = tree.view_box.rect;
 
     // If there's no viewbox defined, use the em square for our scale
     // transformation ...
@@ -173,24 +187,72 @@ fn render_svg_glyph(
         height = view_box.height() as f32;
     }
 
-    // FIXME: This doesn't respect the clipping mask.
     let size = text.size.to_f32();
     let ts = ts.pre_scale(size / width, size / height);
-    resvg::render(&tree, FitTo::Original, ts, canvas.as_mut())
+
+    // Compute the space we need to draw our glyph.
+    // See https://github.com/RazrFalcon/resvg/issues/602 for why
+    // using the svg size is problematic here.
+    let mut bbox = usvg::Rect::new_bbox();
+    for node in tree.root.descendants() {
+        if let Some(rect) = node.calculate_bbox().and_then(|b| b.to_rect()) {
+            bbox = bbox.expand(rect);
+        }
+    }
+
+    let canvas_rect = usvg::ScreenRect::new(0, 0, canvas.width(), canvas.height())?;
+
+    // Compute the bbox after the transform is applied.
+    // We add a nice 5px border along the bounding box to
+    // be on the safe size. We also compute the intersection
+    // with the canvas rectangle
+    let svg_ts = usvg::Transform::new(
+        ts.sx.into(),
+        ts.kx.into(),
+        ts.ky.into(),
+        ts.sy.into(),
+        ts.tx.into(),
+        ts.ty.into(),
+    );
+    let bbox = bbox.transform(&svg_ts)?.to_screen_rect();
+    let bbox = usvg::ScreenRect::new(
+        bbox.left() - 5,
+        bbox.y() - 5,
+        bbox.width() + 10,
+        bbox.height() + 10,
+    )?
+    .fit_to_rect(canvas_rect);
+
+    let mut pixmap = sk::Pixmap::new(bbox.width(), bbox.height())?;
+
+    // We offset our transform so that the pixmap starts at the edge of the bbox.
+    let ts = ts.post_translate(-bbox.left() as f32, -bbox.top() as f32);
+    resvg::render(&tree, FitTo::Original, ts, pixmap.as_mut())?;
+
+    canvas.draw_pixmap(
+        bbox.left(),
+        bbox.top(),
+        pixmap.as_ref(),
+        &sk::PixmapPaint::default(),
+        sk::Transform::identity(),
+        mask,
+    );
+
+    Some(())
 }
 
 /// Render a bitmap glyph into the canvas.
 fn render_bitmap_glyph(
     canvas: &mut sk::Pixmap,
     ts: sk::Transform,
-    mask: Option<&sk::ClipMask>,
+    mask: Option<&sk::Mask>,
     text: &TextItem,
     id: GlyphId,
 ) -> Option<()> {
     let size = text.size.to_f32();
     let ppem = size * ts.sy;
     let raster = text.font.ttf().glyph_raster_image(id, ppem as u16)?;
-    let image = Image::new(raster.data.into(), raster.format.into()).ok()?;
+    let image = Image::new(raster.data.into(), raster.format.into(), None).ok()?;
 
     // FIXME: Vertical alignment isn't quite right for Apple Color Emoji,
     // and maybe also for Noto Color Emoji. And: Is the size calculation
@@ -207,7 +269,7 @@ fn render_bitmap_glyph(
 fn render_outline_glyph(
     canvas: &mut sk::Pixmap,
     ts: sk::Transform,
-    mask: Option<&sk::ClipMask>,
+    mask: Option<&sk::Mask>,
     text: &TextItem,
     id: GlyphId,
 ) -> Option<()> {
@@ -223,14 +285,14 @@ fn render_outline_glyph(
             builder.0.finish()?
         };
 
-        let paint = text.fill.into();
+        let paint = (&text.fill).into();
         let rule = sk::FillRule::default();
 
         // Flip vertically because font design coordinate
         // system is Y-up.
         let scale = text.size.to_f32() / text.font.units_per_em() as f32;
         let ts = ts.pre_scale(scale, -scale);
-        canvas.fill_path(&path, &paint, rule, ts, mask)?;
+        canvas.fill_path(&path, &paint, rule, ts, mask);
         return Some(());
     }
 
@@ -239,52 +301,87 @@ fn render_outline_glyph(
     // doesn't exist, yet.
     let glyph = pixglyph::Glyph::load(text.font.ttf(), id)?;
     let bitmap = glyph.rasterize(ts.tx, ts.ty, ppem);
-    let cw = canvas.width() as i32;
-    let ch = canvas.height() as i32;
-    let mw = bitmap.width as i32;
-    let mh = bitmap.height as i32;
 
-    // Determine the pixel bounding box that we actually need to draw.
-    let left = bitmap.left;
-    let right = left + mw;
-    let top = bitmap.top;
-    let bottom = top + mh;
+    // If we have a clip mask we first render to a pixmap that we then blend
+    // with our canvas
+    if mask.is_some() {
+        let mw = bitmap.width;
+        let mh = bitmap.height;
 
-    // Premultiply the text color.
-    let Paint::Solid(color) = text.fill;
-    let c = color.to_rgba();
-    let color = sk::ColorU8::from_rgba(c.r, c.g, c.b, 255).premultiply().get();
+        let Paint::Solid(color) = text.fill;
+        let c = color.to_rgba();
 
-    // Blend the glyph bitmap with the existing pixels on the canvas.
-    // FIXME: This doesn't respect the clipping mask.
-    let pixels = bytemuck::cast_slice_mut::<u8, u32>(canvas.data_mut());
-    for x in left.clamp(0, cw)..right.clamp(0, cw) {
-        for y in top.clamp(0, ch)..bottom.clamp(0, ch) {
-            let ai = ((y - top) * mw + (x - left)) as usize;
-            let cov = bitmap.coverage[ai];
-            if cov == 0 {
-                continue;
+        // Pad the pixmap with 1 pixel in each dimension so that we do
+        // not get any problem with floating point errors along their border
+        let mut pixmap = sk::Pixmap::new(mw + 2, mh + 2)?;
+        for x in 0..mw {
+            for y in 0..mh {
+                let alpha = bitmap.coverage[(y * mw + x) as usize];
+                let color = sk::ColorU8::from_rgba(c.r, c.g, c.b, alpha).premultiply();
+                pixmap.pixels_mut()[((y + 1) * (mw + 2) + (x + 1)) as usize] = color;
             }
-
-            let pi = (y * cw + x) as usize;
-            if cov == 255 {
-                pixels[pi] = color;
-                continue;
-            }
-
-            let applied = alpha_mul(color, cov as u32);
-            pixels[pi] = blend_src_over(applied, pixels[pi]);
         }
-    }
 
-    Some(())
+        let left = bitmap.left;
+        let top = bitmap.top;
+
+        canvas.draw_pixmap(
+            left - 1,
+            top - 1,
+            pixmap.as_ref(),
+            &sk::PixmapPaint::default(),
+            sk::Transform::identity(),
+            mask,
+        );
+
+        Some(())
+    } else {
+        let cw = canvas.width() as i32;
+        let ch = canvas.height() as i32;
+        let mw = bitmap.width as i32;
+        let mh = bitmap.height as i32;
+
+        // Determine the pixel bounding box that we actually need to draw.
+        let left = bitmap.left;
+        let right = left + mw;
+        let top = bitmap.top;
+        let bottom = top + mh;
+
+        // Premultiply the text color.
+        let Paint::Solid(color) = text.fill;
+        let c = color.to_rgba();
+        let color = sk::ColorU8::from_rgba(c.r, c.g, c.b, 255).premultiply().get();
+
+        // Blend the glyph bitmap with the existing pixels on the canvas.
+        let pixels = bytemuck::cast_slice_mut::<u8, u32>(canvas.data_mut());
+        for x in left.clamp(0, cw)..right.clamp(0, cw) {
+            for y in top.clamp(0, ch)..bottom.clamp(0, ch) {
+                let ai = ((y - top) * mw + (x - left)) as usize;
+                let cov = bitmap.coverage[ai];
+                if cov == 0 {
+                    continue;
+                }
+
+                let pi = (y * cw + x) as usize;
+                if cov == 255 {
+                    pixels[pi] = color;
+                    continue;
+                }
+
+                let applied = alpha_mul(color, cov as u32);
+                pixels[pi] = blend_src_over(applied, pixels[pi]);
+            }
+        }
+
+        Some(())
+    }
 }
 
 /// Render a geometrical shape into the canvas.
 fn render_shape(
     canvas: &mut sk::Pixmap,
     ts: sk::Transform,
-    mask: Option<&sk::ClipMask>,
+    mask: Option<&sk::Mask>,
     shape: &Shape,
 ) -> Option<()> {
     let path = match shape.geometry {
@@ -302,7 +399,7 @@ fn render_shape(
         Geometry::Path(ref path) => convert_path(path)?,
     };
 
-    if let Some(fill) = shape.fill {
+    if let Some(fill) = &shape.fill {
         let mut paint: sk::Paint = fill.into();
         if matches!(shape.geometry, Geometry::Rect(_)) {
             paint.anti_alias = false;
@@ -312,10 +409,40 @@ fn render_shape(
         canvas.fill_path(&path, &paint, rule, ts, mask);
     }
 
-    if let Some(Stroke { paint, thickness }) = shape.stroke {
-        let paint = paint.into();
-        let stroke = sk::Stroke { width: thickness.to_f32(), ..Default::default() };
-        canvas.stroke_path(&path, &paint, &stroke, ts, mask);
+    if let Some(Stroke {
+        paint,
+        thickness,
+        line_cap,
+        line_join,
+        dash_pattern,
+        miter_limit,
+    }) = &shape.stroke
+    {
+        let width = thickness.to_f32();
+
+        // Don't draw zero-pt stroke.
+        if width > 0.0 {
+            let dash = dash_pattern.as_ref().and_then(|pattern| {
+                // tiny-skia only allows dash patterns with an even number of elements,
+                // while pdf allows any number.
+                let pattern_len = pattern.array.len();
+                let len =
+                    if pattern_len % 2 == 1 { 2 * pattern_len } else { pattern_len };
+                let dash_array =
+                    pattern.array.iter().map(|l| l.to_f32()).cycle().take(len).collect();
+
+                sk::StrokeDash::new(dash_array, pattern.phase.to_f32())
+            });
+            let paint = paint.into();
+            let stroke = sk::Stroke {
+                width,
+                line_cap: line_cap.into(),
+                line_join: line_join.into(),
+                dash,
+                miter_limit: miter_limit.0 as f32,
+            };
+            canvas.stroke_path(&path, &paint, &stroke, ts, mask);
+        }
     }
 
     Some(())
@@ -354,21 +481,31 @@ fn convert_path(path: &geom::Path) -> Option<sk::Path> {
 fn render_image(
     canvas: &mut sk::Pixmap,
     ts: sk::Transform,
-    mask: Option<&sk::ClipMask>,
+    mask: Option<&sk::Mask>,
     image: &Image,
     size: Size,
 ) -> Option<()> {
     let view_width = size.x.to_f32();
     let view_height = size.y.to_f32();
 
+    // For better-looking output, resize `image` to its final size before
+    // painting it to `canvas`. For the math, see:
+    // https://github.com/typst/typst/issues/1404#issuecomment-1598374652
+    let theta = f32::atan2(-ts.kx, ts.sx);
+
+    // To avoid division by 0, choose the one of { sin, cos } that is
+    // further from 0.
+    let prefer_sin = theta.sin().abs() > std::f32::consts::FRAC_1_SQRT_2;
+    let scale_x =
+        f32::abs(if prefer_sin { ts.kx / theta.sin() } else { ts.sx / theta.cos() });
+
     let aspect = (image.width() as f32) / (image.height() as f32);
-    let scale = ts.sx.max(ts.sy);
-    let w = (scale * view_width.max(aspect * view_height)).ceil() as u32;
+    let w = (scale_x * view_width.max(aspect * view_height)).ceil() as u32;
     let h = ((w as f32) / aspect).ceil() as u32;
 
     let pixmap = scaled_texture(image, w, h)?;
-    let scale_x = view_width / pixmap.width() as f32;
-    let scale_y = view_height / pixmap.height() as f32;
+    let paint_scale_x = view_width / pixmap.width() as f32;
+    let paint_scale_y = view_height / pixmap.height() as f32;
 
     let paint = sk::Paint {
         shader: sk::Pattern::new(
@@ -376,7 +513,7 @@ fn render_image(
             sk::SpreadMode::Pad,
             sk::FilterQuality::Nearest,
             1.0,
-            sk::Transform::from_scale(scale_x, scale_y),
+            sk::Transform::from_scale(paint_scale_x, paint_scale_y),
         ),
         ..Default::default()
     };
@@ -391,8 +528,8 @@ fn render_image(
 #[comemo::memoize]
 fn scaled_texture(image: &Image, w: u32, h: u32) -> Option<Arc<sk::Pixmap>> {
     let mut pixmap = sk::Pixmap::new(w, h)?;
-    match image.decode().unwrap().as_ref() {
-        DecodedImage::Raster(dynamic, _) => {
+    match image.decoded().as_ref() {
+        DecodedImage::Raster(dynamic, _, _) => {
             let downscale = w < image.width();
             let filter =
                 if downscale { FilterType::Lanczos3 } else { FilterType::CatmullRom };
@@ -428,10 +565,10 @@ impl From<Transform> for sk::Transform {
     }
 }
 
-impl From<Paint> for sk::Paint<'static> {
-    fn from(paint: Paint) -> Self {
+impl From<&Paint> for sk::Paint<'static> {
+    fn from(paint: &Paint) -> Self {
         let mut sk_paint = sk::Paint::default();
-        let Paint::Solid(color) = paint;
+        let Paint::Solid(color) = *paint;
         sk_paint.set_color(color.into());
         sk_paint.anti_alias = true;
         sk_paint
@@ -442,6 +579,26 @@ impl From<Color> for sk::Color {
     fn from(color: Color) -> Self {
         let c = color.to_rgba();
         sk::Color::from_rgba8(c.r, c.g, c.b, c.a)
+    }
+}
+
+impl From<&LineCap> for sk::LineCap {
+    fn from(line_cap: &LineCap) -> Self {
+        match line_cap {
+            LineCap::Butt => sk::LineCap::Butt,
+            LineCap::Round => sk::LineCap::Round,
+            LineCap::Square => sk::LineCap::Square,
+        }
+    }
+}
+
+impl From<&LineJoin> for sk::LineJoin {
+    fn from(line_join: &LineJoin) -> Self {
+        match line_join {
+            LineJoin::Miter => sk::LineJoin::Miter,
+            LineJoin::Round => sk::LineJoin::Round,
+            LineJoin::Bevel => sk::LineJoin::Bevel,
+        }
     }
 }
 

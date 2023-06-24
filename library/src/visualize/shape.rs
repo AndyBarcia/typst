@@ -4,7 +4,7 @@ use crate::prelude::*;
 
 /// A rectangle with optional content.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// // Without content.
 /// #rect(width: 35%, height: 30pt)
@@ -38,18 +38,13 @@ pub struct RectElem {
 
     /// How to stroke the rectangle. This can be:
     ///
-    /// - `{none}` to disable the stroke.
-    /// - `{auto}` for a stroke of `{1pt}` black if and if only if no fill is
+    /// - `{none}` to disable stroking
+    /// - `{auto}` for a stroke of `{1pt + black}` if and if only if no fill is
     ///   given.
-    /// - A length specifying the stroke's thickness. The color is inherited,
-    ///   defaulting to black.
-    /// - A color to use for the stroke. The thickness is inherited, defaulting
-    ///   to `{1pt}`.
-    /// - A stroke combined from color and thickness using the `+` operator as
-    ///   in `{2pt + red}`.
-    /// - A dictionary: With a dictionary, the stroke for each side can be set
-    ///   individually. The dictionary can contain the following keys in order
-    ///   of precedence:
+    /// - Any kind of stroke that can also be used for
+    ///   [lines]($func/line.stroke).
+    /// - A dictionary describing the stroke for each side inidvidually. The
+    ///   dictionary can contain the following keys in order of precedence:
     ///   - `top`: The top stroke.
     ///   - `right`: The right stroke.
     ///   - `bottom`: The bottom stroke.
@@ -112,13 +107,11 @@ pub struct RectElem {
 
     /// How much to pad the rectangle's content.
     ///
-    /// The default value is `{5pt}`.
-    ///
     /// _Note:_ When the rectangle contains text, its exact size depends on the
     /// current [text edges]($func/text.top-edge).
     ///
     /// ```example
-    /// #rect(inset: 0pt)[Tight])
+    /// #rect(inset: 0pt)[Tight]
     /// ```
     #[resolve]
     #[fold]
@@ -140,6 +133,7 @@ pub struct RectElem {
 }
 
 impl Layout for RectElem {
+    #[tracing::instrument(name = "RectElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -165,7 +159,7 @@ impl Layout for RectElem {
 
 /// A square with optional content.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// // Without content.
 /// #square(size: 40pt)
@@ -227,8 +221,6 @@ pub struct SquareElem {
 
     /// How much to pad the square's content. See the [rectangle's
     /// documentation]($func/rect.inset) for more details.
-    ///
-    /// The default value is `{5pt}`.
     #[resolve]
     #[fold]
     #[default(Sides::splat(Abs::pt(5.0).into()))]
@@ -250,6 +242,7 @@ pub struct SquareElem {
 }
 
 impl Layout for SquareElem {
+    #[tracing::instrument(name = "SquareElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -275,7 +268,7 @@ impl Layout for SquareElem {
 
 /// An ellipse with optional content.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// // Without content.
 /// #ellipse(width: 35%, height: 30pt)
@@ -310,8 +303,6 @@ pub struct EllipseElem {
 
     /// How much to pad the ellipse's content. See the [rectangle's
     /// documentation]($func/rect.inset) for more details.
-    ///
-    /// The default value is `{5pt}`.
     #[resolve]
     #[fold]
     #[default(Sides::splat(Abs::pt(5.0).into()))]
@@ -332,6 +323,7 @@ pub struct EllipseElem {
 }
 
 impl Layout for EllipseElem {
+    #[tracing::instrument(name = "EllipseElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -357,7 +349,7 @@ impl Layout for EllipseElem {
 
 /// A circle with optional content.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// // Without content.
 /// #circle(radius: 25pt)
@@ -382,7 +374,7 @@ pub struct CircleElem {
     /// The circle's width. This is mutually exclusive with `radius` and
     /// `height`.
     ///
-    /// In contrast to `size`, this can be relative to the parent container's
+    /// In contrast to `radius`, this can be relative to the parent container's
     /// width.
     #[parse(
         let size = args
@@ -398,7 +390,7 @@ pub struct CircleElem {
     /// The circle's height.This is mutually exclusive with `radius` and
     /// `width`.
     ///
-    /// In contrast to `size`, this can be relative to the parent container's
+    /// In contrast to `radius`, this can be relative to the parent container's
     /// height.
     #[parse(match size {
         None => args.named("height")?,
@@ -419,8 +411,6 @@ pub struct CircleElem {
 
     /// How much to pad the circle's content. See the [rectangle's
     /// documentation]($func/rect.inset) for more details.
-    ///
-    /// The default value is `{5pt}`.
     #[resolve]
     #[fold]
     #[default(Sides::splat(Abs::pt(5.0).into()))]
@@ -439,6 +429,7 @@ pub struct CircleElem {
 }
 
 impl Layout for CircleElem {
+    #[tracing::instrument(name = "CircleElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -463,6 +454,8 @@ impl Layout for CircleElem {
 }
 
 /// Layout a shape.
+#[tracing::instrument(name = "shape::layout", skip_all)]
+#[allow(clippy::too_many_arguments)]
 fn layout(
     vt: &mut Vt,
     styles: StyleChain,
@@ -494,13 +487,22 @@ fn layout(
         let pod = Regions::one(region, expand);
         frame = child.layout(vt, styles, pod)?.into_frame();
 
+        // Enforce correct size.
+        *frame.size_mut() = expand.select(region, frame.size());
+
         // Relayout with full expansion into square region to make sure
         // the result is really a square or circle.
         if kind.is_quadratic() {
+            frame.set_size(Size::splat(frame.size().max_by_side()));
             let length = frame.size().max_by_side().min(region.min_by_side());
-            let size = Size::splat(length);
-            let pod = Regions::one(size, Axes::splat(true));
+            let pod = Regions::one(Size::splat(length), Axes::splat(true));
             frame = child.layout(vt, styles, pod)?.into_frame();
+        }
+
+        // Enforce correct size again.
+        *frame.size_mut() = expand.select(region, frame.size());
+        if kind.is_quadratic() {
+            frame.set_size(Size::splat(frame.size().max_by_side()));
         }
     } else {
         // The default size that a shape takes on if it has no child and

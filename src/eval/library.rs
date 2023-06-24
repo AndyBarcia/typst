@@ -4,7 +4,7 @@ use std::num::NonZeroUsize;
 
 use comemo::Tracked;
 use ecow::EcoString;
-use once_cell::sync::OnceCell;
+use std::sync::OnceLock;
 
 use super::{Args, Dynamic, Module, Value, Vm};
 use crate::diag::SourceResult;
@@ -65,16 +65,19 @@ pub struct LangItems {
     /// A reference: `@target`, `@target[..]`.
     pub reference: fn(target: Label, supplement: Option<Content>) -> Content,
     /// The keys contained in the bibliography and short descriptions of them.
+    #[allow(clippy::type_complexity)]
     pub bibliography_keys: fn(
-        world: Tracked<dyn World>,
+        world: Tracked<dyn World + '_>,
         introspector: Tracked<Introspector>,
     ) -> Vec<(EcoString, Option<EcoString>)>,
     /// A section heading: `= Introduction`.
     pub heading: fn(level: NonZeroUsize, body: Content) -> Content,
+    /// The heading function.
+    pub heading_func: ElemFunc,
     /// An item in a bullet list: `- ...`.
     pub list_item: fn(body: Content) -> Content,
     /// An item in an enumeration (numbered list): `+ ...` or `1. ...`.
-    pub enum_item: fn(number: Option<NonZeroUsize>, body: Content) -> Content,
+    pub enum_item: fn(number: Option<usize>, body: Content) -> Content,
     /// An item in a term list: `/ Term: Details`.
     pub term_item: fn(term: Content, description: Content) -> Content,
     /// A mathematical equation: `$x$`, `$ x^2 $`.
@@ -84,12 +87,24 @@ pub struct LangItems {
     /// Matched delimiters in math: `[x + y]`.
     pub math_delimited: fn(open: Content, body: Content, close: Content) -> Content,
     /// A base with optional attachments in math: `a_1^2`.
-    pub math_attach:
-        fn(base: Content, bottom: Option<Content>, top: Option<Content>) -> Content,
+    #[allow(clippy::type_complexity)]
+    pub math_attach: fn(
+        base: Content,
+        // Positioned smartly.
+        t: Option<Content>,
+        b: Option<Content>,
+        // Fixed positions.
+        tl: Option<Content>,
+        bl: Option<Content>,
+        tr: Option<Content>,
+        br: Option<Content>,
+    ) -> Content,
     /// A base with an accent: `arrow(x)`.
     pub math_accent: fn(base: Content, accent: char) -> Content,
     /// A fraction in math: `x/2`.
     pub math_frac: fn(num: Content, denom: Content) -> Content,
+    /// A root in math: `√x`, `∛x` or `∜x`.
+    pub math_root: fn(index: Option<Content>, radicand: Content) -> Content,
     /// Dispatch a method on a library value.
     pub library_method: fn(
         vm: &mut Vm,
@@ -121,9 +136,12 @@ impl Hash for LangItems {
         self.strong.hash(state);
         self.emph.hash(state);
         self.raw.hash(state);
+        self.raw_languages.hash(state);
         self.link.hash(state);
         self.reference.hash(state);
+        (self.bibliography_keys as usize).hash(state);
         self.heading.hash(state);
+        self.heading_func.hash(state);
         self.list_item.hash(state);
         self.enum_item.hash(state);
         self.term_item.hash(state);
@@ -133,12 +151,14 @@ impl Hash for LangItems {
         self.math_attach.hash(state);
         self.math_accent.hash(state);
         self.math_frac.hash(state);
+        self.math_root.hash(state);
+        (self.library_method as usize).hash(state);
     }
 }
 
 /// Global storage for lang items.
 #[doc(hidden)]
-pub static LANG_ITEMS: OnceCell<LangItems> = OnceCell::new();
+pub static LANG_ITEMS: OnceLock<LangItems> = OnceLock::new();
 
 /// Set the lang items.
 ///

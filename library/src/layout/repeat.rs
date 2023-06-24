@@ -12,7 +12,7 @@ use super::AlignElem;
 /// Errors if there no bounds on the available space, as it would create
 /// infinite content.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// Sign on the dotted line:
 /// #box(width: 1fr, repeat[.])
@@ -34,6 +34,7 @@ pub struct RepeatElem {
 }
 
 impl Layout for RepeatElem {
+    #[tracing::instrument(name = "RepeatElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,

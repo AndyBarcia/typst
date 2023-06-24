@@ -2,13 +2,13 @@ use typst::geom::Transform;
 
 use crate::prelude::*;
 
-/// Move content without affecting layout.
+/// Moves content without affecting layout.
 ///
 /// The `move` function allows you to move content while the layout still 'sees'
-/// it at the original positions. Containers will still be sized as if the content
-/// was not moved.
+/// it at the original positions. Containers will still be sized as if the
+/// content was not moved.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #rect(inset: 0pt, move(
 ///   dx: 6pt, dy: 6pt,
@@ -37,6 +37,7 @@ pub struct MoveElem {
 }
 
 impl Layout for MoveElem {
+    #[tracing::instrument(name = "MoveElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -52,12 +53,12 @@ impl Layout for MoveElem {
     }
 }
 
-/// Rotate content with affecting layout.
+/// Rotates content without affecting layout.
 ///
-/// Rotate an element by a given angle. The layout will act as if the element
+/// Rotates an element by a given angle. The layout will act as if the element
 /// was not rotated.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #stack(
 ///   dir: ltr,
@@ -82,10 +83,9 @@ pub struct RotateElem {
 
     /// The origin of the rotation.
     ///
-    /// By default, the origin is the center of the rotated element. If,
-    /// however, you wanted the bottom left corner of the rotated element to
-    /// stay aligned with the baseline, you would set the origin to `bottom +
-    /// left`.
+    /// If, for instance, you wanted the bottom left corner of the rotated
+    /// element to stay aligned with the baseline, you would set it to `bottom +
+    /// left` instead.
     ///
     /// ```example
     /// #set text(spacing: 8pt)
@@ -97,6 +97,8 @@ pub struct RotateElem {
     /// #box(rotate(30deg, origin: bottom + right, square()))
     /// ```
     #[resolve]
+    #[fold]
+    #[default(Align::CENTER_HORIZON)]
     pub origin: Axes<Option<GenAlign>>,
 
     /// The content to rotate.
@@ -105,6 +107,7 @@ pub struct RotateElem {
 }
 
 impl Layout for RotateElem {
+    #[tracing::instrument(name = "RotateElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -113,8 +116,8 @@ impl Layout for RotateElem {
     ) -> SourceResult<Fragment> {
         let pod = Regions::one(regions.base(), Axes::splat(false));
         let mut frame = self.body().layout(vt, styles, pod)?.into_frame();
-        let origin = self.origin(styles).unwrap_or(Align::CENTER_HORIZON);
-        let Axes { x, y } = origin.zip(frame.size()).map(|(o, s)| o.position(s));
+        let Axes { x, y } =
+            self.origin(styles).zip(frame.size()).map(|(o, s)| o.position(s));
         let ts = Transform::translate(x, y)
             .pre_concat(Transform::rotate(self.angle(styles)))
             .pre_concat(Transform::translate(-x, -y));
@@ -123,13 +126,11 @@ impl Layout for RotateElem {
     }
 }
 
-/// Scale content without affecting layout.
+/// Scales content without affecting layout.
 ///
-/// The `scale` function allows you to scale and mirror content without
-/// affecting the layout.
+/// Lets you mirror content by specifying a negative scale on a single axis.
 ///
-///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #set align(center)
 /// #scale(x: -100%)[This is mirrored.]
@@ -158,13 +159,13 @@ pub struct ScaleElem {
 
     /// The origin of the transformation.
     ///
-    /// By default, the origin is the center of the scaled element.
-    ///
     /// ```example
     /// A#box(scale(75%)[A])A \
     /// B#box(scale(75%, origin: bottom + left)[B])B
     /// ```
     #[resolve]
+    #[fold]
+    #[default(Align::CENTER_HORIZON)]
     pub origin: Axes<Option<GenAlign>>,
 
     /// The content to scale.
@@ -173,6 +174,7 @@ pub struct ScaleElem {
 }
 
 impl Layout for ScaleElem {
+    #[tracing::instrument(name = "ScaleElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -181,8 +183,8 @@ impl Layout for ScaleElem {
     ) -> SourceResult<Fragment> {
         let pod = Regions::one(regions.base(), Axes::splat(false));
         let mut frame = self.body().layout(vt, styles, pod)?.into_frame();
-        let origin = self.origin(styles).unwrap_or(Align::CENTER_HORIZON);
-        let Axes { x, y } = origin.zip(frame.size()).map(|(o, s)| o.position(s));
+        let Axes { x, y } =
+            self.origin(styles).zip(frame.size()).map(|(o, s)| o.position(s));
         let transform = Transform::translate(x, y)
             .pre_concat(Transform::scale(self.x(styles), self.y(styles)))
             .pre_concat(Transform::translate(-x, -y));

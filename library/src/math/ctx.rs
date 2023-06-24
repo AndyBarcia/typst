@@ -1,5 +1,6 @@
 use ttf_parser::math::MathValue;
 use typst::font::{FontStyle, FontWeight};
+use typst::model::realize;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::*;
@@ -61,7 +62,7 @@ impl<'a, 'b, 'v> MathContext<'a, 'b, 'v> {
         Self {
             vt,
             regions: Regions::one(regions.base(), Axes::splat(false)),
-            font: &font,
+            font,
             ttf: font.ttf(),
             table,
             constants,
@@ -97,7 +98,7 @@ impl<'a, 'b, 'v> MathContext<'a, 'b, 'v> {
         elem: &dyn LayoutMath,
     ) -> SourceResult<MathFragment> {
         let row = self.layout_fragments(elem)?;
-        Ok(MathRow::new(row).to_fragment(self))
+        Ok(MathRow::new(row).into_fragment(self))
     }
 
     pub fn layout_fragments(
@@ -115,20 +116,20 @@ impl<'a, 'b, 'v> MathContext<'a, 'b, 'v> {
     }
 
     pub fn layout_frame(&mut self, elem: &dyn LayoutMath) -> SourceResult<Frame> {
-        Ok(self.layout_fragment(elem)?.to_frame())
+        Ok(self.layout_fragment(elem)?.into_frame())
     }
 
     pub fn layout_content(&mut self, content: &Content) -> SourceResult<Frame> {
         Ok(content
-            .layout(&mut self.vt, self.outer.chain(&self.local), self.regions)?
+            .layout(self.vt, self.outer.chain(&self.local), self.regions)?
             .into_frame())
     }
 
-    pub fn layout_text(&mut self, elem: &TextElem) -> SourceResult<()> {
+    pub fn layout_text(&mut self, elem: &TextElem) -> SourceResult<MathFragment> {
         let text = elem.text();
         let span = elem.span();
         let mut chars = text.chars();
-        if let Some(glyph) = chars
+        let fragment = if let Some(glyph) = chars
             .next()
             .filter(|_| chars.next().is_none())
             .map(|c| self.style.styled_char(c))
@@ -139,9 +140,9 @@ impl<'a, 'b, 'v> MathContext<'a, 'b, 'v> {
                 && glyph.class == Some(MathClass::Large)
             {
                 let height = scaled!(self, display_operator_min_height);
-                self.push(glyph.stretch_vertical(self, height, Abs::zero()));
+                glyph.stretch_vertical(self, height, Abs::zero()).into()
             } else {
-                self.push(glyph);
+                glyph.into()
             }
         } else if text.chars().all(|c| c.is_ascii_digit()) {
             // Numbers aren't that difficult.
@@ -150,29 +151,31 @@ impl<'a, 'b, 'v> MathContext<'a, 'b, 'v> {
                 let c = self.style.styled_char(c);
                 fragments.push(GlyphFragment::new(self, c, span).into());
             }
-            let frame = MathRow::new(fragments).to_frame(self);
-            self.push(FrameFragment::new(self, frame));
+            let frame = MathRow::new(fragments).into_frame(self);
+            FrameFragment::new(self, frame).into()
         } else {
             // Anything else is handled by Typst's standard text layout.
-            let spaced = text.graphemes(true).count() > 1;
+            let spaced = text.graphemes(true).nth(1).is_some();
             let mut style = self.style;
             if self.style.italic == Smart::Auto {
                 style = style.with_italic(false);
             }
             let text: EcoString = text.chars().map(|c| style.styled_char(c)).collect();
             let frame = self.layout_content(&TextElem::packed(text).spanned(span))?;
-            self.push(
-                FrameFragment::new(self, frame)
-                    .with_class(MathClass::Alphabetic)
-                    .with_spaced(spaced),
-            );
-        }
-
-        Ok(())
+            FrameFragment::new(self, frame)
+                .with_class(MathClass::Alphabetic)
+                .with_spaced(spaced)
+                .into()
+        };
+        Ok(fragment)
     }
 
     pub fn styles(&self) -> StyleChain {
         self.outer.chain(&self.local)
+    }
+
+    pub fn realize(&mut self, content: &Content) -> SourceResult<Option<Content>> {
+        realize(self.vt, content, self.outer.chain(&self.local))
     }
 
     pub fn style(&mut self, style: MathStyle) {

@@ -11,7 +11,7 @@ use super::GridLayouter;
 ///
 /// Displays a sequence of items vertically and numbers them consecutively.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// Automatically numbered:
 /// + Preparations
@@ -36,7 +36,18 @@ use super::GridLayouter;
 /// + Don't forget step two
 /// ```
 ///
-/// ## Syntax
+/// You can also use [`enum.item`]($func/enum.item) to programmatically
+/// customize the number of each item in the enumeration:
+///
+/// ```example
+/// #enum(
+///   enum.item(1)[First step],
+///   enum.item(5)[Fifth step],
+///   enum.item(10)[Tenth step]
+/// )
+/// ```
+///
+/// ## Syntax { #syntax }
 /// This functions also has dedicated syntax:
 ///
 /// - Starting a line with a plus sign creates an automatically numbered
@@ -51,11 +62,20 @@ use super::GridLayouter;
 /// Display: Numbered List
 /// Category: layout
 #[element(Layout)]
+#[scope(
+    scope.define("item", EnumItem::func());
+    scope
+)]
 pub struct EnumElem {
     /// If this is `{false}`, the items are spaced apart with
     /// [enum spacing]($func/enum.spacing). If it is `{true}`, they use normal
     /// [leading]($func/par.leading) instead. This makes the enumeration more
     /// compact, which can look better if the items are short.
+    ///
+    /// In markup mode, the value of this parameter is determined based on
+    /// whether items are separated with a blank line. If items directly follow
+    /// each other, this is set to `{true}`; if items are separated by a blank
+    /// line, this is set to `{false}`.
     ///
     /// ```example
     /// + If an enum has a lot of text, and
@@ -100,13 +120,12 @@ pub struct EnumElem {
     ///   [Ahead],
     /// )
     /// ```
-    #[default(NonZeroUsize::ONE)]
-    pub start: NonZeroUsize,
+    #[default(1)]
+    pub start: usize,
 
     /// Whether to display the full numbering, including the numbers of
     /// all parent enumerations.
     ///
-    /// Defaults to `{false}`.
     ///
     /// ```example
     /// #set enum(numbering: "1.a)", full: true)
@@ -118,7 +137,7 @@ pub struct EnumElem {
     #[default(false)]
     pub full: bool,
 
-    /// The indentation of each item's label.
+    /// The indentation of each item.
     #[resolve]
     pub indent: Length,
 
@@ -131,6 +150,30 @@ pub struct EnumElem {
     ///
     /// If set to `{auto}`, uses the spacing [below blocks]($func/block.below).
     pub spacing: Smart<Spacing>,
+
+    /// The horizontal alignment that enum numbers should have.
+    ///
+    /// By default, this is set to `{end}`, which aligns enum numbers
+    /// towards end of the current text direction (in left-to-right script,
+    /// for example, this is the same as `{right}`). The choice of `{end}`
+    /// for horizontal alignment of enum numbers is usually preferred over
+    /// `{start}`, as numbers then grow away from the text instead of towards
+    /// it, avoiding certain visual issues. This option lets you override this
+    /// behavior, however.
+    ///
+    /// ````example
+    /// #set enum(number-align: start)
+    ///
+    /// Here are some powers of two:
+    /// 1. One
+    /// 2. Two
+    /// 4. Four
+    /// 8. Eight
+    /// 16. Sixteen
+    /// 32. Thirty two
+    /// ````
+    #[default(HorizontalAlign(GenAlign::End))]
+    pub number_align: HorizontalAlign,
 
     /// The numbered list's items.
     ///
@@ -154,6 +197,7 @@ pub struct EnumElem {
 }
 
 impl Layout for EnumElem {
+    #[tracing::instrument(name = "EnumElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -175,6 +219,13 @@ impl Layout for EnumElem {
         let mut parents = self.parents(styles);
         let full = self.full(styles);
 
+        // Horizontally align based on the given respective parameter.
+        // Vertically align to the top to avoid inheriting 'horizon' or
+        // 'bottom' alignment from the context and having the number be
+        // displaced in relation to the item it refers to.
+        let number_align: Axes<Option<GenAlign>> =
+            Axes::new(self.number_align(styles).into(), Align::Top.into()).map(Some);
+
         for item in self.children() {
             number = item.number(styles).unwrap_or(number);
 
@@ -192,6 +243,11 @@ impl Layout for EnumElem {
                 }
             };
 
+            // Disable overhang as a workaround to end-aligned dots glitching
+            // and decreasing spacing between numbers and items.
+            let resolved =
+                resolved.aligned(number_align).styled(TextElem::set_overhang(false));
+
             cells.push(Content::empty());
             cells.push(resolved);
             cells.push(Content::empty());
@@ -200,7 +256,6 @@ impl Layout for EnumElem {
         }
 
         let layouter = GridLayouter::new(
-            vt,
             Axes::with_x(&[
                 Sizing::Rel(indent.into()),
                 Sizing::Auto,
@@ -213,7 +268,7 @@ impl Layout for EnumElem {
             styles,
         );
 
-        Ok(layouter.layout()?.fragment)
+        Ok(layouter.layout(vt)?.fragment)
     }
 }
 
@@ -225,39 +280,36 @@ impl Layout for EnumElem {
 pub struct EnumItem {
     /// The item's number.
     #[positional]
-    pub number: Option<NonZeroUsize>,
+    pub number: Option<usize>,
 
     /// The item's body.
     #[required]
     pub body: Content,
 }
 
-cast_from_value! {
+cast! {
     EnumItem,
     array: Array => {
         let mut iter = array.into_iter();
         let (number, body) = match (iter.next(), iter.next(), iter.next()) {
             (Some(a), Some(b), None) => (a.cast()?, b.cast()?),
-            _ => Err("array must contain exactly two entries")?,
+            _ => bail!("array must contain exactly two entries"),
         };
         Self::new(body).with_number(number)
     },
     v: Content => v.to::<Self>().cloned().unwrap_or_else(|| Self::new(v.clone())),
 }
 
-struct Parent(NonZeroUsize);
+struct Parent(usize);
 
-cast_from_value! {
+cast! {
     Parent,
-    v: NonZeroUsize => Self(v),
-}
-
-cast_to_value! {
-    v: Parent => v.0.into()
+    self => self.0.into_value(),
+    v: usize => Self(v),
 }
 
 impl Fold for Parent {
-    type Output = Vec<NonZeroUsize>;
+    type Output = Vec<usize>;
 
     fn fold(self, mut outer: Self::Output) -> Self::Output {
         outer.push(self.0);

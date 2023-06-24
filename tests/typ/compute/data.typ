@@ -42,6 +42,48 @@
 #json("/bad.json")
 
 ---
+// Test reading TOML data.
+#let data = toml("/toml-types.toml")
+#test(data.string, "wonderful")
+#test(data.integer, 42)
+#test(data.float, 3.14)
+#test(data.boolean, true)
+#test(data.array, (1, "string", 3.0, false))
+#test(data.inline_table, ("first": "amazing", "second": "greater") )
+#test(data.table.element, 5)
+#test(data.table.others, (false, "indeed", 7))
+#test(data.date_time, datetime(
+  year: 2023,
+  month: 2,
+  day: 1,
+  hour: 15,
+  minute: 38,
+  second: 57,
+))
+
+---
+// Error: 7-18 failed to parse toml file: expected `.`, `=`, index 15-15
+#toml("/bad.toml")
+
+---
+// Test reading YAML data
+#let data = yaml("/yaml-types.yaml")
+#test(data.len(), 7)
+#test(data.null_key, (none, none))
+#test(data.string, "text")
+#test(data.integer, 5)
+#test(data.float, 1.12)
+#test(data.mapping, ("1": "one", "2": "two"))
+#test(data.seq, (1,2,3,4))
+#test(data.bool, false)
+#test(data.keys().contains("true"), false)
+---
+
+---
+// Error: 7-18 failed to parse yaml file: while parsing a flow sequence, expected ',' or ']' at line 2 column 1
+#yaml("/bad.yaml")
+
+---
 // Test reading XML data.
 #let data = xml("/data.xml")
 #test(data, ((

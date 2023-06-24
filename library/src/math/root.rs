@@ -2,25 +2,24 @@ use super::*;
 
 /// A square root.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ sqrt(x^2) = x = sqrt(x)^2 $
 /// ```
 ///
 /// Display: Square Root
 /// Category: math
-/// Returns: content
 #[func]
 pub fn sqrt(
     /// The expression to take the square root of.
     radicand: Content,
-) -> Value {
-    RootElem::new(radicand).pack().into()
+) -> Content {
+    RootElem::new(radicand).pack()
 }
 
 /// A general root.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ root(3, x) $
 /// ```
@@ -31,14 +30,15 @@ pub fn sqrt(
 pub struct RootElem {
     /// Which root of the radicand to take.
     #[positional]
-    index: Option<Content>,
+    pub index: Option<Content>,
 
     /// The expression to take the root of.
     #[required]
-    radicand: Content,
+    pub radicand: Content,
 }
 
 impl LayoutMath for RootElem {
+    #[tracing::instrument(skip(ctx))]
     fn layout_math(&self, ctx: &mut MathContext) -> SourceResult<()> {
         layout(ctx, self.index(ctx.styles()).as_ref(), &self.radicand(), self.span())
     }
@@ -121,8 +121,11 @@ fn layout(
     frame.push(
         line_pos,
         FrameItem::Shape(
-            Geometry::Line(Point::with_x(radicand.width()))
-                .stroked(Stroke { paint: TextElem::fill_in(ctx.styles()), thickness }),
+            Geometry::Line(Point::with_x(radicand.width())).stroked(Stroke {
+                paint: TextElem::fill_in(ctx.styles()),
+                thickness,
+                ..Stroke::default()
+            }),
             span,
         ),
     );

@@ -1,6 +1,6 @@
 use ecow::{eco_format, EcoString};
+use unicode_ident::{is_xid_continue, is_xid_start};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_xid::UnicodeXID;
 use unscanny::Scanner;
 
 use super::{ErrorPos, SyntaxKind};
@@ -78,12 +78,6 @@ impl Lexer<'_> {
     /// Construct a full-positioned syntax error.
     fn error(&mut self, message: impl Into<EcoString>) -> SyntaxKind {
         self.error = Some((message.into(), ErrorPos::Full));
-        SyntaxKind::Error
-    }
-
-    /// Construct a positioned syntax error.
-    fn error_at_end(&mut self, message: impl Into<EcoString>) -> SyntaxKind {
-        self.error = Some((message.into(), ErrorPos::End));
         SyntaxKind::Error
     }
 }
@@ -170,7 +164,6 @@ impl Lexer<'_> {
             '`' => self.raw(),
             'h' if self.s.eat_if("ttp://") => self.link(),
             'h' if self.s.eat_if("ttps://") => self.link(),
-            '0'..='9' => self.numbering(start),
             '<' if self.s.at(is_id_continue) => self.label(),
             '@' => self.ref_marker(),
 
@@ -200,6 +193,7 @@ impl Lexer<'_> {
             '-' if self.space_or_end() => SyntaxKind::ListMarker,
             '+' if self.space_or_end() => SyntaxKind::EnumMarker,
             '/' if self.space_or_end() => SyntaxKind::TermMarker,
+            '0'..='9' => self.numbering(start),
 
             _ => self.text(),
         }
@@ -209,7 +203,7 @@ impl Lexer<'_> {
         if self.s.eat_if("u{") {
             let hex = self.s.eat_while(char::is_ascii_alphanumeric);
             if !self.s.eat_if('}') {
-                return self.error_at_end("expected closing brace");
+                return self.error("unclosed Unicode escape sequence");
             }
 
             if u32::from_str_radix(hex, 16)
@@ -217,7 +211,7 @@ impl Lexer<'_> {
                 .and_then(std::char::from_u32)
                 .is_none()
             {
-                return self.error("invalid unicode escape sequence");
+                return self.error(eco_format!("invalid Unicode codepoint: {}", hex));
             }
 
             return SyntaxKind::Escape;
@@ -251,29 +245,47 @@ impl Lexer<'_> {
         }
 
         if found != backticks {
-            let remaining = backticks - found;
-            let noun = if remaining == 1 { "backtick" } else { "backticks" };
-            return self.error_at_end(if found == 0 {
-                eco_format!("expected {} {}", remaining, noun)
-            } else {
-                eco_format!("expected {} more {}", remaining, noun)
-            });
+            return self.error("unclosed raw text");
         }
 
         SyntaxKind::Raw
     }
 
     fn link(&mut self) -> SyntaxKind {
-        #[rustfmt::skip]
-        self.s.eat_while(|c: char| matches!(c,
-            | '0' ..= '9'
-            | 'a' ..= 'z'
-            | 'A' ..= 'Z'
-            | '~'  | '/' | '%' | '?' | '#' | '&' | '+' | '='
-            | '\'' | '.' | ',' | ';'
-        ));
+        let mut brackets = Vec::new();
 
-        if self.s.scout(-1) == Some('.') {
+        #[rustfmt::skip]
+        self.s.eat_while(|c: char| {
+            match c {
+                | '0' ..= '9'
+                | 'a' ..= 'z'
+                | 'A' ..= 'Z'
+                | '!' | '#' | '$' | '%' | '&' | '*' | '+'
+                | ',' | '-' | '.' | '/' | ':' | ';' | '='
+                | '?' | '@' | '_' | '~' | '\'' => true,
+                '[' => {
+                    brackets.push(SyntaxKind::LeftBracket);
+                    true
+                }
+                '(' => {
+                    brackets.push(SyntaxKind::LeftParen);
+                    true
+                }
+                ']' => brackets.pop() == Some(SyntaxKind::LeftBracket),
+                ')' => brackets.pop() == Some(SyntaxKind::LeftParen),
+                _ => false,
+            }
+        });
+
+        if !brackets.is_empty() {
+            return self.error(
+                "automatic links cannot contain unbalanced brackets, \
+                 use the `link` function instead",
+            );
+        }
+
+        // Don't include the trailing characters likely to be part of text.
+        while matches!(self.s.scout(-1), Some('!' | ',' | '.' | ':' | ';' | '?' | '\'')) {
             self.s.uneat();
         }
 
@@ -284,32 +296,32 @@ impl Lexer<'_> {
         self.s.eat_while(char::is_ascii_digit);
 
         let read = self.s.from(start);
-        if self.s.eat_if('.') {
-            if let Ok(number) = read.parse::<usize>() {
-                if number == 0 {
-                    return self.error("must be positive");
-                }
-
-                return SyntaxKind::EnumMarker;
-            }
+        if self.s.eat_if('.') && self.space_or_end() && read.parse::<usize>().is_ok() {
+            return SyntaxKind::EnumMarker;
         }
 
         self.text()
     }
 
     fn ref_marker(&mut self) -> SyntaxKind {
-        self.s.eat_while(is_id_continue);
+        self.s.eat_while(|c| is_id_continue(c) || matches!(c, ':' | '.'));
+
+        // Don't include the trailing characters likely to be part of text.
+        while matches!(self.s.scout(-1), Some('.' | ':')) {
+            self.s.uneat();
+        }
+
         SyntaxKind::RefMarker
     }
 
     fn label(&mut self) -> SyntaxKind {
-        let label = self.s.eat_while(is_id_continue);
+        let label = self.s.eat_while(|c| is_id_continue(c) || matches!(c, ':' | '.'));
         if label.is_empty() {
             return self.error("label cannot be empty");
         }
 
         if !self.s.eat_if('>') {
-            return self.error_at_end("expected closing angle bracket");
+            return self.error("unclosed label");
         }
 
         SyntaxKind::Label
@@ -418,6 +430,7 @@ impl Lexer<'_> {
             '/' => SyntaxKind::Slash,
             '^' => SyntaxKind::Hat,
             '&' => SyntaxKind::MathAlignPoint,
+            '√' | '∛' | '∜' => SyntaxKind::Root,
 
             // Identifiers.
             c if is_math_id_start(c) && self.s.at(is_math_id_continue) => {
@@ -434,6 +447,10 @@ impl Lexer<'_> {
         // Keep numbers and grapheme clusters together.
         if c.is_numeric() {
             self.s.eat_while(char::is_numeric);
+            let mut s = self.s;
+            if s.eat_if('.') && !s.eat_while(char::is_numeric).is_empty() {
+                self.s = s;
+            }
         } else {
             let len = self
                 .s
@@ -489,7 +506,7 @@ impl Lexer<'_> {
 
             c if is_id_start(c) => self.ident(start),
 
-            _ => self.error("this character is not valid in code"),
+            c => self.error(eco_format!("the character `{c}` is not valid in code")),
         }
     }
 
@@ -504,12 +521,35 @@ impl Lexer<'_> {
             }
         }
 
-        SyntaxKind::Ident
+        if ident == "_" {
+            SyntaxKind::Underscore
+        } else {
+            SyntaxKind::Ident
+        }
     }
 
-    fn number(&mut self, start: usize, c: char) -> SyntaxKind {
+    fn number(&mut self, mut start: usize, c: char) -> SyntaxKind {
+        // Handle alternative integer bases.
+        let mut base = 10;
+        if c == '0' {
+            if self.s.eat_if('b') {
+                base = 2;
+            } else if self.s.eat_if('o') {
+                base = 8;
+            } else if self.s.eat_if('x') {
+                base = 16;
+            }
+            if base != 10 {
+                start = self.s.cursor();
+            }
+        }
+
         // Read the first part (integer or fractional depending on `first`).
-        self.s.eat_while(char::is_ascii_digit);
+        self.s.eat_while(if base == 16 {
+            char::is_ascii_alphanumeric
+        } else {
+            char::is_ascii_digit
+        });
 
         // Read the fractional part if not already done.
         // Make sure not to confuse a range for the decimal separator.
@@ -517,12 +557,13 @@ impl Lexer<'_> {
             && !self.s.at("..")
             && !self.s.scout(1).map_or(false, is_id_start)
             && self.s.eat_if('.')
+            && base == 10
         {
             self.s.eat_while(char::is_ascii_digit);
         }
 
         // Read the exponent.
-        if !self.s.at("em") && self.s.eat_if(['e', 'E']) {
+        if !self.s.at("em") && self.s.eat_if(['e', 'E']) && base == 10 {
             self.s.eat_if(['+', '-']);
             self.s.eat_while(char::is_ascii_digit);
         }
@@ -536,21 +577,28 @@ impl Lexer<'_> {
         let number = self.s.get(start..suffix_start);
         let suffix = self.s.from(suffix_start);
 
+        let kind = if i64::from_str_radix(number, base).is_ok() {
+            SyntaxKind::Int
+        } else if base == 10 && number.parse::<f64>().is_ok() {
+            SyntaxKind::Float
+        } else {
+            return self.error(match base {
+                2 => eco_format!("invalid binary number: 0b{}", number),
+                8 => eco_format!("invalid octal number: 0o{}", number),
+                16 => eco_format!("invalid hexadecimal number: 0x{}", number),
+                _ => eco_format!("invalid number: {}", number),
+            });
+        };
+
         if suffix.is_empty() {
-            return if number.parse::<i64>().is_ok() {
-                SyntaxKind::Int
-            } else if number.parse::<f64>().is_ok() {
-                SyntaxKind::Float
-            } else {
-                self.error("invalid number")
-            };
+            return kind;
         }
 
         if !matches!(
             suffix,
             "pt" | "mm" | "cm" | "in" | "deg" | "rad" | "em" | "fr" | "%"
         ) {
-            return self.error("invalid number suffix");
+            return self.error(eco_format!("invalid number suffix: {}", suffix));
         }
 
         SyntaxKind::Numeric
@@ -565,7 +613,7 @@ impl Lexer<'_> {
         });
 
         if !self.s.eat_if('"') {
-            return self.error_at_end("expected quote");
+            return self.error("unclosed string");
         }
 
         SyntaxKind::Str
@@ -668,23 +716,23 @@ pub fn is_ident(string: &str) -> bool {
 /// Whether a character can start an identifier.
 #[inline]
 pub(crate) fn is_id_start(c: char) -> bool {
-    c.is_xid_start() || c == '_'
+    is_xid_start(c) || c == '_'
 }
 
 /// Whether a character can continue an identifier.
 #[inline]
 pub(crate) fn is_id_continue(c: char) -> bool {
-    c.is_xid_continue() || c == '_' || c == '-'
+    is_xid_continue(c) || c == '_' || c == '-'
 }
 
 /// Whether a character can start an identifier in math.
 #[inline]
 fn is_math_id_start(c: char) -> bool {
-    c.is_xid_start()
+    is_xid_start(c)
 }
 
 /// Whether a character can continue an identifier in math.
 #[inline]
 fn is_math_id_continue(c: char) -> bool {
-    c.is_xid_continue() && c != '_'
+    is_xid_continue(c) && c != '_'
 }

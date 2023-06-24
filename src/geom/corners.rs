@@ -1,3 +1,5 @@
+use crate::eval::{CastInfo, FromValue, IntoValue, Reflect};
+
 use super::*;
 
 /// A container with components for the four corners of a rectangle.
@@ -76,12 +78,12 @@ impl<T> Corners<T> {
 impl<T> Get<Corner> for Corners<T> {
     type Component = T;
 
-    fn get(self, corner: Corner) -> T {
+    fn get_ref(&self, corner: Corner) -> &T {
         match corner {
-            Corner::TopLeft => self.top_left,
-            Corner::TopRight => self.top_right,
-            Corner::BottomRight => self.bottom_right,
-            Corner::BottomLeft => self.bottom_left,
+            Corner::TopLeft => &self.top_left,
+            Corner::TopRight => &self.top_right,
+            Corner::BottomRight => &self.bottom_right,
+            Corner::BottomLeft => &self.bottom_left,
         }
     }
 
@@ -108,52 +110,92 @@ pub enum Corner {
     BottomLeft,
 }
 
-impl<T> Cast for Corners<Option<T>>
-where
-    T: Cast + Copy,
-{
-    fn is(value: &Value) -> bool {
-        matches!(value, Value::Dict(_)) || T::is(value)
-    }
-
-    fn cast(mut value: Value) -> StrResult<Self> {
-        if let Value::Dict(dict) = &mut value {
-            let mut take = |key| dict.take(key).ok().map(T::cast).transpose();
-
-            let rest = take("rest")?;
-            let left = take("left")?.or(rest);
-            let top = take("top")?.or(rest);
-            let right = take("right")?.or(rest);
-            let bottom = take("bottom")?.or(rest);
-            let corners = Corners {
-                top_left: take("top-left")?.or(top).or(left),
-                top_right: take("top-right")?.or(top).or(right),
-                bottom_right: take("bottom-right")?.or(bottom).or(right),
-                bottom_left: take("bottom-left")?.or(bottom).or(left),
-            };
-
-            dict.finish(&[
-                "top-left",
-                "top-right",
-                "bottom-right",
-                "bottom-left",
-                "left",
-                "top",
-                "right",
-                "bottom",
-                "rest",
-            ])?;
-
-            Ok(corners)
-        } else if T::is(&value) {
-            Ok(Self::splat(Some(T::cast(value)?)))
-        } else {
-            <Self as Cast>::error(value)
-        }
-    }
-
+impl<T: Reflect> Reflect for Corners<Option<T>> {
     fn describe() -> CastInfo {
-        T::describe() + CastInfo::Type("dictionary")
+        T::describe() + Dict::describe()
+    }
+
+    fn castable(value: &Value) -> bool {
+        Dict::castable(value) || T::castable(value)
+    }
+}
+
+impl<T> IntoValue for Corners<T>
+where
+    T: PartialEq + IntoValue,
+{
+    fn into_value(self) -> Value {
+        if self.is_uniform() {
+            return self.top_left.into_value();
+        }
+
+        let mut dict = Dict::new();
+        let mut handle = |key: &str, component: T| {
+            let value = component.into_value();
+            if value != Value::None {
+                dict.insert(key.into(), value);
+            }
+        };
+
+        handle("top-left", self.top_left);
+        handle("top-right", self.top_right);
+        handle("bottom-right", self.bottom_right);
+        handle("bottom-left", self.bottom_left);
+
+        Value::Dict(dict)
+    }
+}
+
+impl<T> FromValue for Corners<Option<T>>
+where
+    T: FromValue + Clone,
+{
+    fn from_value(mut value: Value) -> StrResult<Self> {
+        let keys = [
+            "top-left",
+            "top-right",
+            "bottom-right",
+            "bottom-left",
+            "left",
+            "top",
+            "right",
+            "bottom",
+            "rest",
+        ];
+
+        if let Value::Dict(dict) = &mut value {
+            if dict.iter().any(|(key, _)| keys.contains(&key.as_str())) {
+                let mut take = |key| dict.take(key).ok().map(T::from_value).transpose();
+                let rest = take("rest")?;
+                let left = take("left")?.or_else(|| rest.clone());
+                let top = take("top")?.or_else(|| rest.clone());
+                let right = take("right")?.or_else(|| rest.clone());
+                let bottom = take("bottom")?.or_else(|| rest.clone());
+                let corners = Corners {
+                    top_left: take("top-left")?
+                        .or_else(|| top.clone())
+                        .or_else(|| left.clone()),
+                    top_right: take("top-right")?
+                        .or_else(|| top.clone())
+                        .or_else(|| right.clone()),
+                    bottom_right: take("bottom-right")?
+                        .or_else(|| bottom.clone())
+                        .or_else(|| right.clone()),
+                    bottom_left: take("bottom-left")?
+                        .or_else(|| bottom.clone())
+                        .or_else(|| left.clone()),
+                };
+
+                dict.finish(&keys)?;
+                return Ok(corners);
+            }
+        }
+
+        if T::castable(&value) {
+            Ok(Self::splat(Some(T::from_value(value)?)))
+        } else {
+            Err(Self::error(&value))
+        }
     }
 }
 
@@ -173,34 +215,5 @@ impl<T: Fold> Fold for Corners<Option<T>> {
             Some(value) => value.fold(outer),
             None => outer,
         })
-    }
-}
-
-impl<T> From<Corners<Option<T>>> for Value
-where
-    T: PartialEq + Into<Value>,
-{
-    fn from(corners: Corners<Option<T>>) -> Self {
-        if corners.is_uniform() {
-            if let Some(value) = corners.top_left {
-                return value.into();
-            }
-        }
-
-        let mut dict = Dict::new();
-        if let Some(top_left) = corners.top_left {
-            dict.insert("top-left".into(), top_left.into());
-        }
-        if let Some(top_right) = corners.top_right {
-            dict.insert("top-right".into(), top_right.into());
-        }
-        if let Some(bottom_right) = corners.bottom_right {
-            dict.insert("bottom-right".into(), bottom_right.into());
-        }
-        if let Some(bottom_left) = corners.bottom_left {
-            dict.insert("bottom-left".into(), bottom_left.into());
-        }
-
-        Value::Dict(dict)
     }
 }

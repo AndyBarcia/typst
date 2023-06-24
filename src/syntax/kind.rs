@@ -67,6 +67,8 @@ pub enum SyntaxKind {
     MathAttach,
     /// A fraction in math: `x/2`.
     MathFrac,
+    /// A root in math: `√x`, `∛x` or `∜x`.
+    MathRoot,
 
     /// A hashtag that switches into code mode: `#`.
     Hashtag,
@@ -134,6 +136,8 @@ pub enum SyntaxKind {
     Dots,
     /// An arrow between a closure's parameters and body: `=>`.
     Arrow,
+    /// A root: `√`, `∛` or `∜`.
+    Root,
 
     /// The `not` operator.
     Not,
@@ -230,9 +234,7 @@ pub enum SyntaxKind {
     WhileLoop,
     /// A for loop: `for x in y { z }`.
     ForLoop,
-    /// A for loop's destructuring pattern: `x` or `x, y`.
-    ForPattern,
-    /// A module import: `import a, b, c from "utils.typ"`.
+    /// A module import: `import "utils.typ": a, b, c`.
     ModuleImport,
     /// Items to import from a module: `a, b, c`.
     ImportItems,
@@ -244,6 +246,10 @@ pub enum SyntaxKind {
     LoopContinue,
     /// A return from a function: `return`, `return x + 1`.
     FuncReturn,
+    /// A destructuring pattern: `(x, _, ..y)`.
+    Destructuring,
+    /// A destructuring assignment expression: `(x, y) = (1, 2)`.
+    DestructAssignment,
 
     /// A line comment: `// ...`.
     LineComment,
@@ -345,6 +351,7 @@ impl SyntaxKind {
             Self::MathDelimited => "delimited math",
             Self::MathAttach => "math attachments",
             Self::MathFrac => "math fraction",
+            Self::MathRoot => "math root",
             Self::Hashtag => "hashtag",
             Self::LeftBrace => "opening brace",
             Self::RightBrace => "closing brace",
@@ -376,6 +383,7 @@ impl SyntaxKind {
             Self::SlashEq => "divide-assign operator",
             Self::Dots => "dots",
             Self::Arrow => "arrow",
+            Self::Root => "root",
             Self::Not => "operator `not`",
             Self::And => "operator `and`",
             Self::Or => "operator `or`",
@@ -423,13 +431,14 @@ impl SyntaxKind {
             Self::Conditional => "`if` expression",
             Self::WhileLoop => "while-loop expression",
             Self::ForLoop => "for-loop expression",
-            Self::ForPattern => "for-loop destructuring pattern",
             Self::ModuleImport => "`import` expression",
             Self::ImportItems => "import items",
             Self::ModuleInclude => "`include` expression",
             Self::LoopBreak => "`break` expression",
             Self::LoopContinue => "`continue` expression",
             Self::FuncReturn => "`return` expression",
+            Self::Destructuring => "destructuring pattern",
+            Self::DestructAssignment => "destructuring assignment expression",
             Self::LineComment => "line comment",
             Self::BlockComment => "block comment",
             Self::Error => "syntax error",

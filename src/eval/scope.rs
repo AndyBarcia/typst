@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 
-use ecow::EcoString;
+use ecow::{eco_format, EcoString};
 
-use super::{Library, Value};
-use crate::diag::StrResult;
+use super::{IntoValue, Library, Value};
+use crate::diag::{bail, StrResult};
 
 /// A stack of scopes.
 #[derive(Debug, Default, Clone)]
@@ -38,20 +38,20 @@ impl<'a> Scopes<'a> {
 
     /// Try to access a variable immutably.
     pub fn get(&self, var: &str) -> StrResult<&Value> {
-        Ok(std::iter::once(&self.top)
+        std::iter::once(&self.top)
             .chain(self.scopes.iter().rev())
             .chain(self.base.map(|base| base.global.scope()))
             .find_map(|scope| scope.get(var))
-            .ok_or("unknown variable")?)
+            .ok_or_else(|| unknown_variable(var))
     }
 
     /// Try to access a variable immutably in math.
     pub fn get_in_math(&self, var: &str) -> StrResult<&Value> {
-        Ok(std::iter::once(&self.top)
+        std::iter::once(&self.top)
             .chain(self.scopes.iter().rev())
             .chain(self.base.map(|base| base.math.scope()))
             .find_map(|scope| scope.get(var))
-            .ok_or("unknown variable")?)
+            .ok_or_else(|| eco_format!("unknown variable: {}", var))
     }
 
     /// Try to access a variable mutably.
@@ -61,10 +61,20 @@ impl<'a> Scopes<'a> {
             .find_map(|scope| scope.get_mut(var))
             .ok_or_else(|| {
                 match self.base.and_then(|base| base.global.scope().get(var)) {
-                    Some(_) => "cannot mutate a constant",
-                    _ => "unknown variable",
+                    Some(_) => eco_format!("cannot mutate a constant: {}", var),
+                    _ => unknown_variable(var),
                 }
             })?
+    }
+}
+
+/// The error message when a variable is not found.
+#[cold]
+fn unknown_variable(var: &str) -> EcoString {
+    if var.contains('-') {
+        eco_format!("unknown variable: {} - if you meant to use subtraction, try adding spaces around the minus sign.", var)
+    } else {
+        eco_format!("unknown variable: {}", var)
     }
 }
 
@@ -85,7 +95,7 @@ impl Scope {
 
     /// Bind a value to a name.
     #[track_caller]
-    pub fn define(&mut self, name: impl Into<EcoString>, value: impl Into<Value>) {
+    pub fn define(&mut self, name: impl Into<EcoString>, value: impl IntoValue) {
         let name = name.into();
 
         #[cfg(debug_assertions)]
@@ -93,16 +103,13 @@ impl Scope {
             panic!("duplicate definition: {name}");
         }
 
-        self.0.insert(name, Slot::new(value.into(), Kind::Normal));
+        self.0.insert(name, Slot::new(value.into_value(), Kind::Normal));
     }
 
     /// Define a captured, immutable binding.
-    pub fn define_captured(
-        &mut self,
-        var: impl Into<EcoString>,
-        value: impl Into<Value>,
-    ) {
-        self.0.insert(var.into(), Slot::new(value.into(), Kind::Captured));
+    pub fn define_captured(&mut self, var: impl Into<EcoString>, value: impl IntoValue) {
+        self.0
+            .insert(var.into(), Slot::new(value.into_value(), Kind::Captured));
     }
 
     /// Try to access a variable immutably.
@@ -164,7 +171,7 @@ impl Slot {
         match self.kind {
             Kind::Normal => Ok(&mut self.value),
             Kind::Captured => {
-                Err("variables from outside the function are read-only and cannot be modified")?
+                bail!("variables from outside the function are read-only and cannot be modified")
             }
         }
     }

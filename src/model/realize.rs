@@ -37,12 +37,12 @@ pub fn realize(
     if target.needs_preparation() {
         let mut elem = target.clone();
         if target.can::<dyn Locatable>() || target.label().is_some() {
-            let location = vt.provider.locate(hash128(target));
+            let location = vt.locator.locate(hash128(target));
             elem.set_location(location);
         }
 
         if let Some(elem) = elem.with_mut::<dyn Synthesize>() {
-            elem.synthesize(styles);
+            elem.synthesize(vt, styles)?;
         }
 
         elem.mark_prepared();
@@ -152,7 +152,14 @@ fn try_apply(
         }
 
         // Not supported here.
-        Some(Selector::Any(_)) => Ok(None),
+        Some(
+            Selector::Or(_)
+            | Selector::And(_)
+            | Selector::Location(_)
+            | Selector::Can(_)
+            | Selector::Before { .. }
+            | Selector::After { .. },
+        ) => Ok(None),
 
         None => Ok(None),
     }
@@ -165,7 +172,7 @@ pub trait Locatable {}
 /// rule.
 pub trait Synthesize {
     /// Prepare the element for show rule application.
-    fn synthesize(&mut self, styles: StyleChain);
+    fn synthesize(&mut self, vt: &mut Vt, styles: StyleChain) -> SourceResult<()>;
 }
 
 /// The base recipe for an element.
@@ -176,9 +183,8 @@ pub trait Show {
 
 /// Post-process an element after it was realized.
 pub trait Finalize {
-    /// Finalize the fully realized form of the element. Use this for effects that
-    /// should work even in the face of a user-defined show rule, for example
-    /// the linking behaviour of a link element.
+    /// Finalize the fully realized form of the element. Use this for effects
+    /// that should work even in the face of a user-defined show rule.
     fn finalize(&self, realized: Content, styles: StyleChain) -> Content;
 }
 

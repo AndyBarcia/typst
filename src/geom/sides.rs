@@ -1,3 +1,5 @@
+use crate::eval::{CastInfo, FromValue, IntoValue, Reflect};
+
 use super::*;
 
 /// A container with left, top, right and bottom components.
@@ -91,12 +93,12 @@ impl Sides<Rel<Abs>> {
 impl<T> Get<Side> for Sides<T> {
     type Component = T;
 
-    fn get(self, side: Side) -> T {
+    fn get_ref(&self, side: Side) -> &T {
         match side {
-            Side::Left => self.left,
-            Side::Top => self.top,
-            Side::Right => self.right,
-            Side::Bottom => self.bottom,
+            Side::Left => &self.left,
+            Side::Top => &self.top,
+            Side::Right => &self.right,
+            Side::Bottom => &self.bottom,
         }
     }
 
@@ -178,69 +180,71 @@ impl Side {
     }
 }
 
-impl<T> Cast for Sides<Option<T>>
-where
-    T: Default + Cast + Copy,
-{
-    fn is(value: &Value) -> bool {
-        matches!(value, Value::Dict(_)) || T::is(value)
-    }
-
-    fn cast(mut value: Value) -> StrResult<Self> {
-        if let Value::Dict(dict) = &mut value {
-            let mut take = |key| dict.take(key).ok().map(T::cast).transpose();
-
-            let rest = take("rest")?;
-            let x = take("x")?.or(rest);
-            let y = take("y")?.or(rest);
-            let sides = Sides {
-                left: take("left")?.or(x),
-                top: take("top")?.or(y),
-                right: take("right")?.or(x),
-                bottom: take("bottom")?.or(y),
-            };
-
-            dict.finish(&["left", "top", "right", "bottom", "x", "y", "rest"])?;
-
-            Ok(sides)
-        } else if T::is(&value) {
-            Ok(Self::splat(Some(T::cast(value)?)))
-        } else {
-            <Self as Cast>::error(value)
-        }
-    }
-
+impl<T: Reflect> Reflect for Sides<Option<T>> {
     fn describe() -> CastInfo {
-        T::describe() + CastInfo::Type("dictionary")
+        T::describe() + Dict::describe()
+    }
+
+    fn castable(value: &Value) -> bool {
+        Dict::castable(value) || T::castable(value)
     }
 }
 
-impl<T> From<Sides<Option<T>>> for Value
+impl<T> IntoValue for Sides<T>
 where
-    T: PartialEq + Into<Value>,
+    T: PartialEq + IntoValue,
 {
-    fn from(sides: Sides<Option<T>>) -> Self {
-        if sides.is_uniform() {
-            if let Some(value) = sides.left {
-                return value.into();
-            }
+    fn into_value(self) -> Value {
+        if self.is_uniform() {
+            return self.left.into_value();
         }
 
         let mut dict = Dict::new();
-        if let Some(left) = sides.left {
-            dict.insert("left".into(), left.into());
-        }
-        if let Some(top) = sides.top {
-            dict.insert("top".into(), top.into());
-        }
-        if let Some(right) = sides.right {
-            dict.insert("right".into(), right.into());
-        }
-        if let Some(bottom) = sides.bottom {
-            dict.insert("bottom".into(), bottom.into());
-        }
+        let mut handle = |key: &str, component: T| {
+            let value = component.into_value();
+            if value != Value::None {
+                dict.insert(key.into(), value);
+            }
+        };
+
+        handle("left", self.left);
+        handle("top", self.top);
+        handle("right", self.right);
+        handle("bottom", self.bottom);
 
         Value::Dict(dict)
+    }
+}
+
+impl<T> FromValue for Sides<Option<T>>
+where
+    T: Default + FromValue + Clone,
+{
+    fn from_value(mut value: Value) -> StrResult<Self> {
+        let keys = ["left", "top", "right", "bottom", "x", "y", "rest"];
+        if let Value::Dict(dict) = &mut value {
+            if dict.iter().any(|(key, _)| keys.contains(&key.as_str())) {
+                let mut take = |key| dict.take(key).ok().map(T::from_value).transpose();
+                let rest = take("rest")?;
+                let x = take("x")?.or_else(|| rest.clone());
+                let y = take("y")?.or_else(|| rest.clone());
+                let sides = Sides {
+                    left: take("left")?.or_else(|| x.clone()),
+                    top: take("top")?.or_else(|| y.clone()),
+                    right: take("right")?.or_else(|| x.clone()),
+                    bottom: take("bottom")?.or_else(|| y.clone()),
+                };
+
+                dict.finish(&keys)?;
+                return Ok(sides);
+            }
+        }
+
+        if T::castable(&value) {
+            Ok(Self::splat(Some(T::from_value(value)?)))
+        } else {
+            Err(Self::error(&value))
+        }
     }
 }
 

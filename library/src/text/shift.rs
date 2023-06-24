@@ -1,11 +1,11 @@
 use super::{variant, SpaceElem, TextElem, TextSize};
 use crate::prelude::*;
 
-/// Set text in subscript.
+/// Renders text in subscript.
 ///
 /// The text is rendered smaller and its baseline is lowered.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// Revenue#sub[yearly]
 /// ```
@@ -45,6 +45,7 @@ pub struct SubElem {
 }
 
 impl Show for SubElem {
+    #[tracing::instrument(name = "SubElem::show", skip_all)]
     fn show(&self, vt: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
         let body = self.body();
         let mut transformed = None;
@@ -63,11 +64,11 @@ impl Show for SubElem {
     }
 }
 
-/// Set text in superscript.
+/// Renders text in superscript.
 ///
 /// The text is rendered smaller and its baseline is raised.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// 1#super[st] try!
 /// ```
@@ -107,6 +108,7 @@ pub struct SuperElem {
 }
 
 impl Show for SuperElem {
+    #[tracing::instrument(name = "SuperElem::show", skip_all)]
     fn show(&self, vt: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
         let body = self.body();
         let mut transformed = None;
@@ -135,7 +137,7 @@ fn search_text(content: &Content, sub: bool) -> Option<EcoString> {
     } else if let Some(children) = content.to_sequence() {
         let mut full = EcoString::new();
         for item in children {
-            match search_text(&item, sub) {
+            match search_text(item, sub) {
                 Some(text) => full.push_str(&text),
                 None => return None,
             }

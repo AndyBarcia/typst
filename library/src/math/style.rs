@@ -2,38 +2,36 @@ use super::*;
 
 /// Bold font style in math.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ bold(A) := B^+ $
 /// ```
 ///
 /// Display: Bold
 /// Category: math
-/// Returns: content
 #[func]
 pub fn bold(
     /// The content to style.
     body: Content,
-) -> Value {
-    MathStyleElem::new(body).with_bold(Some(true)).pack().into()
+) -> Content {
+    MathStyleElem::new(body).with_bold(Some(true)).pack()
 }
 
 /// Upright (non-italic) font style in math.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ upright(A) != A $
 /// ```
 ///
 /// Display: Upright
 /// Category: math
-/// Returns: content
 #[func]
 pub fn upright(
     /// The content to style.
     body: Content,
-) -> Value {
-    MathStyleElem::new(body).with_italic(Some(false)).pack().into()
+) -> Content {
+    MathStyleElem::new(body).with_italic(Some(false)).pack()
 }
 
 /// Italic font style in math.
@@ -42,13 +40,12 @@ pub fn upright(
 ///
 /// Display: Italic
 /// Category: math
-/// Returns: content
 #[func]
 pub fn italic(
     /// The content to style.
     body: Content,
-) -> Value {
-    MathStyleElem::new(body).with_italic(Some(true)).pack().into()
+) -> Content {
+    MathStyleElem::new(body).with_italic(Some(true)).pack()
 }
 /// Serif (roman) font style in math.
 ///
@@ -56,100 +53,80 @@ pub fn italic(
 ///
 /// Display: Serif
 /// Category: math
-/// Returns: content
 #[func]
 pub fn serif(
     /// The content to style.
     body: Content,
-) -> Value {
-    MathStyleElem::new(body)
-        .with_variant(Some(MathVariant::Serif))
-        .pack()
-        .into()
+) -> Content {
+    MathStyleElem::new(body).with_variant(Some(MathVariant::Serif)).pack()
 }
 
 /// Sans-serif font style in math.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ sans(A B C) $
 /// ```
 ///
 /// Display: Sans-serif
 /// Category: math
-/// Returns: content
 #[func]
 pub fn sans(
     /// The content to style.
     body: Content,
-) -> Value {
-    MathStyleElem::new(body)
-        .with_variant(Some(MathVariant::Sans))
-        .pack()
-        .into()
+) -> Content {
+    MathStyleElem::new(body).with_variant(Some(MathVariant::Sans)).pack()
 }
 
 /// Calligraphic font style in math.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// Let $cal(P)$ be the set of ...
 /// ```
 ///
 /// Display: Calligraphic
 /// Category: math
-/// Returns: content
 #[func]
 pub fn cal(
     /// The content to style.
     body: Content,
-) -> Value {
-    MathStyleElem::new(body)
-        .with_variant(Some(MathVariant::Cal))
-        .pack()
-        .into()
+) -> Content {
+    MathStyleElem::new(body).with_variant(Some(MathVariant::Cal)).pack()
 }
 
 /// Fraktur font style in math.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ frak(P) $
 /// ```
 ///
 /// Display: Fraktur
 /// Category: math
-/// Returns: content
 #[func]
 pub fn frak(
     /// The content to style.
     body: Content,
-) -> Value {
-    MathStyleElem::new(body)
-        .with_variant(Some(MathVariant::Frak))
-        .pack()
-        .into()
+) -> Content {
+    MathStyleElem::new(body).with_variant(Some(MathVariant::Frak)).pack()
 }
 
 /// Monospace font style in math.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ mono(x + y = z) $
 /// ```
 ///
 /// Display: Monospace
 /// Category: math
-/// Returns: content
 #[func]
 pub fn mono(
     /// The content to style.
     body: Content,
-) -> Value {
-    MathStyleElem::new(body)
-        .with_variant(Some(MathVariant::Mono))
-        .pack()
-        .into()
+) -> Content {
+    MathStyleElem::new(body).with_variant(Some(MathVariant::Mono)).pack()
 }
 
 /// Blackboard bold (double-struck) font style in math.
@@ -157,7 +134,7 @@ pub fn mono(
 /// For uppercase latin letters, blackboard bold is additionally available
 /// through [symbols]($category/symbols/sym) of the form `NN` and `RR`.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ bb(b) $
 /// $ bb(N) = NN $
@@ -166,16 +143,122 @@ pub fn mono(
 ///
 /// Display: Blackboard Bold
 /// Category: math
-/// Returns: content
 #[func]
 pub fn bb(
     /// The content to style.
     body: Content,
-) -> Value {
+) -> Content {
+    MathStyleElem::new(body).with_variant(Some(MathVariant::Bb)).pack()
+}
+
+/// Forced display style in math.
+///
+/// This is the normal size for block equations.
+///
+/// ## Example { #example }
+/// ```example
+/// $sum_i x_i/2 = display(sum_i x_i/2)$
+/// ```
+///
+/// Display: Display Size
+/// Category: math
+#[func]
+pub fn display(
+    /// The content to size.
+    body: Content,
+    /// Whether to impose a height restriction for exponents, like regular sub-
+    /// and superscripts do.
+    #[named]
+    #[default(false)]
+    cramped: bool,
+) -> Content {
     MathStyleElem::new(body)
-        .with_variant(Some(MathVariant::Bb))
+        .with_size(Some(MathSize::Display))
+        .with_cramped(Some(cramped))
         .pack()
-        .into()
+}
+
+/// Forced inline (text) style in math.
+///
+/// This is the normal size for inline equations.
+///
+/// ## Example { #example }
+/// ```example
+/// $ sum_i x_i/2
+///     = inline(sum_i x_i/2) $
+/// ```
+///
+/// Display: Inline Size
+/// Category: math
+#[func]
+pub fn inline(
+    /// The content to size.
+    body: Content,
+    /// Whether to impose a height restriction for exponents, like regular sub-
+    /// and superscripts do.
+    #[named]
+    #[default(false)]
+    cramped: bool,
+) -> Content {
+    MathStyleElem::new(body)
+        .with_size(Some(MathSize::Text))
+        .with_cramped(Some(cramped))
+        .pack()
+}
+
+/// Forced script style in math.
+///
+/// This is the smaller size used in powers or sub- or superscripts.
+///
+/// ## Example { #example }
+/// ```example
+/// $sum_i x_i/2 = script(sum_i x_i/2)$
+/// ```
+///
+/// Display: Script Size
+/// Category: math
+#[func]
+pub fn script(
+    /// The content to size.
+    body: Content,
+    /// Whether to impose a height restriction for exponents, like regular sub-
+    /// and superscripts do.
+    #[named]
+    #[default(true)]
+    cramped: bool,
+) -> Content {
+    MathStyleElem::new(body)
+        .with_size(Some(MathSize::Script))
+        .with_cramped(Some(cramped))
+        .pack()
+}
+
+/// Forced second script style in math.
+///
+/// This is the smallest size, used in second-level sub- and superscripts
+/// (script of the script).
+///
+/// ## Example { #example }
+/// ```example
+/// $sum_i x_i/2 = sscript(sum_i x_i/2)$
+/// ```
+///
+/// Display: Script-Script Size
+/// Category: math
+#[func]
+pub fn sscript(
+    /// The content to size.
+    body: Content,
+    /// Whether to impose a height restriction for exponents, like regular sub-
+    /// and superscripts do.
+    #[named]
+    #[default(true)]
+    cramped: bool,
+) -> Content {
+    MathStyleElem::new(body)
+        .with_size(Some(MathSize::ScriptScript))
+        .with_cramped(Some(cramped))
+        .pack()
 }
 
 /// A font variant in math.
@@ -196,9 +279,16 @@ pub struct MathStyleElem {
 
     /// Whether to use italic glyphs.
     pub italic: Option<bool>,
+
+    /// Whether to use forced size
+    pub size: Option<MathSize>,
+
+    /// Whether to limit height of exponents
+    pub cramped: Option<bool>,
 }
 
 impl LayoutMath for MathStyleElem {
+    #[tracing::instrument(skip(ctx))]
     fn layout_math(&self, ctx: &mut MathContext) -> SourceResult<()> {
         let mut style = ctx.style;
         if let Some(variant) = self.variant(StyleChain::default()) {
@@ -209,6 +299,12 @@ impl LayoutMath for MathStyleElem {
         }
         if let Some(italic) = self.italic(StyleChain::default()) {
             style = style.with_italic(italic);
+        }
+        if let Some(size) = self.size(StyleChain::default()) {
+            style = style.with_size(size);
+        }
+        if let Some(cramped) = self.cramped(StyleChain::default()) {
+            style = style.with_cramped(cramped);
         }
         ctx.style(style);
         self.body().layout_math(ctx)?;
@@ -294,7 +390,7 @@ impl MathStyle {
 /// The size of elements in an equation.
 ///
 /// See the TeXbook p. 141.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Cast)]
 pub enum MathSize {
     /// Second-level sub- and superscripts.
     ScriptScript,
@@ -470,11 +566,11 @@ fn latin_exception(
         ('I', Cal, false, _) => 'ℐ',
         ('L', Cal, false, _) => 'ℒ',
         ('M', Cal, false, _) => 'ℳ',
-        ('R', Cal, false, _) => 'ℜ',
+        ('R', Cal, false, _) => 'ℛ',
         ('C', Frak, false, _) => 'ℭ',
         ('H', Frak, false, _) => 'ℌ',
         ('I', Frak, false, _) => 'ℑ',
-        ('R', Frak, false, _) => 'ℛ',
+        ('R', Frak, false, _) => 'ℜ',
         ('Z', Frak, false, _) => 'ℨ',
         ('C', Bb, ..) => 'ℂ',
         ('H', Bb, ..) => 'ℍ',

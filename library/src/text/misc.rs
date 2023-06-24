@@ -5,7 +5,7 @@ use crate::prelude::*;
 ///
 /// Display: Space
 /// Category: text
-#[element(Unlabellable, Behave)]
+#[element(Behave, Unlabellable, PlainText)]
 pub struct SpaceElem {}
 
 impl Behave for SpaceElem {
@@ -16,20 +16,26 @@ impl Behave for SpaceElem {
 
 impl Unlabellable for SpaceElem {}
 
+impl PlainText for SpaceElem {
+    fn plain_text(&self, text: &mut EcoString) {
+        text.push(' ');
+    }
+}
+
 /// Inserts a line break.
 ///
 /// Advances the paragraph to the next line. A single trailing line break at the
 /// end of a paragraph is ignored, but more than one creates additional empty
 /// lines.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// *Date:* 26.12.2022 \
 /// *Topic:* Infrastructure Test \
 /// *Severity:* High \
 /// ```
 ///
-/// ## Syntax
+/// ## Syntax { #syntax }
 /// This function also has dedicated syntax: To insert a line break, simply write
 /// a backslash followed by whitespace. This always creates an unjustified
 /// break.
@@ -65,7 +71,7 @@ impl Behave for LinebreakElem {
 ///
 /// Increases the current font weight by a given `delta`.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// This is *strong.* \
 /// This is #strong[too.] \
@@ -74,7 +80,7 @@ impl Behave for LinebreakElem {
 /// And this is *evermore.*
 /// ```
 ///
-/// ## Syntax
+/// ## Syntax { #syntax }
 /// This function also has dedicated syntax: To strongly emphasize content,
 /// simply enclose it in stars/asterisks (`*`). Note that this only works at
 /// word boundaries. To strongly emphasize part of a word, you have to use the
@@ -99,6 +105,7 @@ pub struct StrongElem {
 }
 
 impl Show for StrongElem {
+    #[tracing::instrument(name = "StrongElem::show", skip_all)]
     fn show(&self, _: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
         Ok(self.body().styled(TextElem::set_delta(Delta(self.delta(styles)))))
     }
@@ -108,13 +115,10 @@ impl Show for StrongElem {
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Delta(pub i64);
 
-cast_from_value! {
+cast! {
     Delta,
+    self => self.0.into_value(),
     v: i64 => Self(v),
-}
-
-cast_to_value! {
-    v: Delta => v.0.into()
 }
 
 impl Fold for Delta {
@@ -132,7 +136,7 @@ impl Fold for Delta {
 /// - If it is already `{"italic"}` or `{"oblique"}`,
 ///   it turns it back to `{"normal"}`.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// This is _emphasized._ \
 /// This is #emph[too.]
@@ -144,7 +148,7 @@ impl Fold for Delta {
 /// This is _emphasized_ differently.
 /// ```
 ///
-/// ## Syntax
+/// ## Syntax { #syntax }
 /// This function also has dedicated syntax: To emphasize content, simply
 /// enclose it in underscores (`_`). Note that this only works at word
 /// boundaries. To emphasize part of a word, you have to use the function.
@@ -159,6 +163,7 @@ pub struct EmphElem {
 }
 
 impl Show for EmphElem {
+    #[tracing::instrument(name = "EmphElem::show", skip(self))]
     fn show(&self, _: &mut Vt, _: StyleChain) -> SourceResult<Content> {
         Ok(self.body().styled(TextElem::set_emph(Toggle)))
     }
@@ -168,13 +173,10 @@ impl Show for EmphElem {
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Toggle;
 
-cast_from_value! {
+cast! {
     Toggle,
+    self => Value::None,
     _: Value => Self,
-}
-
-cast_to_value! {
-    _: Toggle => Value::None
 }
 
 impl Fold for Toggle {
@@ -185,9 +187,9 @@ impl Fold for Toggle {
     }
 }
 
-/// Convert text or content to lowercase.
+/// Converts text or content to lowercase.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #lower("ABC") \
 /// #lower[*My Text*] \
@@ -196,18 +198,17 @@ impl Fold for Toggle {
 ///
 /// Display: Lowercase
 /// Category: text
-/// Returns: string or content
 #[func]
 pub fn lower(
     /// The text to convert to lowercase.
-    text: ToCase,
-) -> Value {
+    text: Caseable,
+) -> Caseable {
     case(text, Case::Lower)
 }
 
-/// Convert text or content to uppercase.
+/// Converts text or content to uppercase.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #upper("abc") \
 /// #upper[*my text*] \
@@ -216,31 +217,36 @@ pub fn lower(
 ///
 /// Display: Uppercase
 /// Category: text
-/// Returns: string or content
 #[func]
 pub fn upper(
     /// The text to convert to uppercase.
-    text: ToCase,
-) -> Value {
+    text: Caseable,
+) -> Caseable {
     case(text, Case::Upper)
 }
 
 /// Change the case of text.
-fn case(text: ToCase, case: Case) -> Value {
+fn case(text: Caseable, case: Case) -> Caseable {
     match text {
-        ToCase::Str(v) => Value::Str(case.apply(&v).into()),
-        ToCase::Content(v) => Value::Content(v.styled(TextElem::set_case(Some(case)))),
+        Caseable::Str(v) => Caseable::Str(case.apply(&v).into()),
+        Caseable::Content(v) => {
+            Caseable::Content(v.styled(TextElem::set_case(Some(case))))
+        }
     }
 }
 
 /// A value whose case can be changed.
-enum ToCase {
+pub enum Caseable {
     Str(Str),
     Content(Content),
 }
 
-cast_from_value! {
-    ToCase,
+cast! {
+    Caseable,
+    self => match self {
+        Self::Str(v) => v.into_value(),
+        Self::Content(v) => v.into_value(),
+    },
     v: Str => Self::Str(v),
     v: Content => Self::Content(v),
 }
@@ -264,7 +270,7 @@ impl Case {
     }
 }
 
-/// Display text in small capitals.
+/// Displays text in small capitals.
 ///
 /// _Note:_ This enables the OpenType `smcp` feature for the font. Not all fonts
 /// support this feature. Sometimes smallcaps are part of a dedicated font and
@@ -272,7 +278,7 @@ impl Case {
 /// support selecting a dedicated smallcaps font as well as synthesizing
 /// smallcaps from normal letters, but this is not yet implemented.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #set par(justify: true)
 /// #set heading(numbering: "I.")
@@ -289,23 +295,22 @@ impl Case {
 ///
 /// Display: Small Capitals
 /// Category: text
-/// Returns: content
 #[func]
 pub fn smallcaps(
     /// The text to display to small capitals.
     body: Content,
-) -> Value {
-    Value::Content(body.styled(TextElem::set_smallcaps(true)))
+) -> Content {
+    body.styled(TextElem::set_smallcaps(true))
 }
 
-/// Create blind text.
+/// Creates blind text.
 ///
 /// This function yields a Latin-like _Lorem Ipsum_ blind text with the given
 /// number of words. The sequence of words generated by the function is always
 /// the same but randomly chosen. As usual for blind texts, it does not make any
 /// sense. Use it as a placeholder to try layouts.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// = Blind Text
 /// #lorem(30)
@@ -316,11 +321,10 @@ pub fn smallcaps(
 ///
 /// Display: Blind Text
 /// Category: text
-/// Returns: string
 #[func]
 pub fn lorem(
     /// The length of the blind text in words.
     words: usize,
-) -> Value {
-    Value::Str(lipsum::lipsum(words).replace("--", "–").into())
+) -> Str {
+    lipsum::lipsum(words).replace("--", "–").into()
 }

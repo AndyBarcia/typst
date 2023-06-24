@@ -1,5 +1,7 @@
+use typst::eval::{CastInfo, Reflect};
+
 use crate::layout::{AlignElem, GridLayouter, TrackSizings};
-use crate::meta::LocalName;
+use crate::meta::{Figurable, LocalName};
 use crate::prelude::*;
 
 /// A table of items.
@@ -10,7 +12,10 @@ use crate::prelude::*;
 /// the [grid documentation]($func/grid) for more information on how to size the
 /// table tracks.
 ///
-/// ## Example
+/// To give a table a caption and make it [referenceable]($func/ref), put it
+/// into a [figure]($func/figure).
+///
+/// ## Example { #example }
 /// ```example
 /// #table(
 ///   columns: (1fr, auto, auto),
@@ -32,38 +37,38 @@ use crate::prelude::*;
 ///
 /// Display: Table
 /// Category: layout
-#[element(Layout, LocalName)]
+#[element(Layout, LocalName, Figurable)]
 pub struct TableElem {
-    /// Defines the column sizes. See the [grid documentation]($func/grid) for
-    /// more information on track sizing.
+    /// The column sizes. See the [grid documentation]($func/grid) for more
+    /// information on track sizing.
     pub columns: TrackSizings,
 
-    /// Defines the row sizes. See the [grid documentation]($func/grid) for more
+    /// The row sizes. See the [grid documentation]($func/grid) for more
     /// information on track sizing.
     pub rows: TrackSizings,
 
-    /// Defines the gaps between rows & columns. See the [grid
+    /// The gaps between rows & columns. See the [grid
     /// documentation]($func/grid) for more information on gutters.
     #[external]
     pub gutter: TrackSizings,
 
-    /// Defines the gaps between columns. Takes precedence over `gutter`. See
-    /// the [grid documentation]($func/grid) for more information on gutters.
+    /// The gaps between columns. Takes precedence over `gutter`. See the [grid
+    /// documentation]($func/grid) for more information on gutters.
     #[parse(
         let gutter = args.named("gutter")?;
         args.named("column-gutter")?.or_else(|| gutter.clone())
     )]
     pub column_gutter: TrackSizings,
 
-    /// Defines the gaps between rows. Takes precedence over `gutter`. See the
-    /// [grid documentation]($func/grid) for more information on gutters.
+    /// The gaps between rows. Takes precedence over `gutter`. See the [grid
+    /// documentation]($func/grid) for more information on gutters.
     #[parse(args.named("row-gutter")?.or_else(|| gutter.clone()))]
     pub row_gutter: TrackSizings,
 
     /// How to fill the cells.
     ///
     /// This can be a color or a function that returns a color. The function is
-    /// passed the cell's column and row index, starting at zero. This can be
+    /// passed the cells' column and row index, starting at zero. This can be
     /// used to implement striped tables.
     ///
     /// ```example
@@ -82,25 +87,37 @@ pub struct TableElem {
     /// ```
     pub fill: Celled<Option<Paint>>,
 
-    /// How to align the cell's content.
+    /// How to align the cells' content.
     ///
-    /// This can either be a single alignment or a function that returns an
-    /// alignment. The function is passed the cell's column and row index,
-    /// starting at zero. If set to `{auto}`, the outer alignment is used.
+    /// This can either be a single alignment, an array of alignments
+    /// (corresponding to each column) or a function that returns an alignment.
+    /// The function is passed the cells' column and row index, starting at zero.
+    /// If set to `{auto}`, the outer alignment is used.
+    ///
+    /// ```example
+    /// #table(
+    ///   columns: 3,
+    ///   align: (x, y) => (left, center, right).at(x),
+    ///   [Hello], [Hello], [Hello],
+    ///   [A], [B], [C],
+    /// )
+    /// ```
     pub align: Celled<Smart<Axes<Option<GenAlign>>>>,
 
     /// How to stroke the cells.
     ///
-    /// This can be a color, a stroke width, both, or `{none}` to disable
-    /// the stroke.
+    /// See the [line's documentation]($func/line.stroke) for more details.
+    /// Strokes can be disabled by setting this to `{none}`.
+    ///
+    /// _Note:_ Richer stroke customization for individual cells is not yet
+    /// implemented, but will be in the future. In the meantime, you can use
+    /// the third-party [tablex library](https://github.com/PgBiel/typst-tablex/).
     #[resolve]
     #[fold]
     #[default(Some(PartialStroke::default()))]
     pub stroke: Option<PartialStroke>,
 
-    /// How much to pad the cells's content.
-    ///
-    /// The default value is `{5pt}`.
+    /// How much to pad the cells' content.
     #[default(Abs::pt(5.0).into())]
     pub inset: Rel<Length>,
 
@@ -110,6 +127,7 @@ pub struct TableElem {
 }
 
 impl Layout for TableElem {
+    #[tracing::instrument(name = "TableElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -144,7 +162,6 @@ impl Layout for TableElem {
 
         // Prepare grid layout by unifying content and gutter tracks.
         let layouter = GridLayouter::new(
-            vt,
             tracks.as_deref(),
             gutter.as_deref(),
             &cells,
@@ -153,19 +170,23 @@ impl Layout for TableElem {
         );
 
         // Measure the columns and layout the grid row-by-row.
-        let mut layout = layouter.layout()?;
+        let mut layout = layouter.layout(vt)?;
 
         // Add lines and backgrounds.
         for (frame, rows) in layout.fragment.iter_mut().zip(&layout.rows) {
+            if layout.cols.is_empty() || rows.is_empty() {
+                continue;
+            }
+
             // Render table lines.
-            if let Some(stroke) = stroke {
+            if let Some(stroke) = &stroke {
                 let thickness = stroke.thickness;
                 let half = thickness / 2.0;
 
                 // Render horizontal lines.
                 for offset in points(rows.iter().map(|piece| piece.height)) {
                     let target = Point::with_x(frame.width() + thickness);
-                    let hline = Geometry::Line(target).stroked(stroke);
+                    let hline = Geometry::Line(target).stroked(stroke.clone());
                     frame.prepend(
                         Point::new(-half, offset),
                         FrameItem::Shape(hline, self.span()),
@@ -175,7 +196,7 @@ impl Layout for TableElem {
                 // Render vertical lines.
                 for offset in points(layout.cols.iter().copied()) {
                     let target = Point::with_y(frame.height() + thickness);
-                    let vline = Geometry::Line(target).stroked(stroke);
+                    let vline = Geometry::Line(target).stroked(stroke.clone());
                     frame.prepend(
                         Point::new(offset, -half),
                         FrameItem::Shape(vline, self.span()),
@@ -204,8 +225,8 @@ impl Layout for TableElem {
     }
 }
 
-/// Turn an iterator extents into an iterator of offsets before, in between, and
-/// after the extents, e.g. [10mm, 5mm] -> [0mm, 10mm, 15mm].
+/// Turn an iterator of extents into an iterator of offsets before, in between,
+/// and after the extents, e.g. [10mm, 5mm] -> [0mm, 10mm, 15mm].
 fn points(extents: impl IntoIterator<Item = Abs>) -> impl Iterator<Item = Abs> {
     let mut offset = Abs::zero();
     std::iter::once(Abs::zero())
@@ -223,17 +244,21 @@ pub enum Celled<T> {
     Value(T),
     /// A closure mapping from cell coordinates to a value.
     Func(Func),
+    /// An array of alignment values corresponding to each column.
+    Array(Vec<T>),
 }
 
-impl<T: Cast + Clone> Celled<T> {
+impl<T: Default + Clone + FromValue> Celled<T> {
     /// Resolve the value based on the cell position.
     pub fn resolve(&self, vt: &mut Vt, x: usize, y: usize) -> SourceResult<T> {
         Ok(match self {
             Self::Value(value) => value.clone(),
-            Self::Func(func) => func
-                .call_vt(vt, [Value::Int(x as i64), Value::Int(y as i64)])?
-                .cast()
-                .at(func.span())?,
+            Self::Func(func) => func.call_vt(vt, [x, y])?.cast().at(func.span())?,
+            Self::Array(array) => x
+                .checked_rem(array.len())
+                .and_then(|i| array.get(i))
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 }
@@ -244,38 +269,66 @@ impl<T: Default> Default for Celled<T> {
     }
 }
 
-impl<T: Cast> Cast for Celled<T> {
-    fn is(value: &Value) -> bool {
-        matches!(value, Value::Func(_)) || T::is(value)
-    }
-
-    fn cast(value: Value) -> StrResult<Self> {
-        match value {
-            Value::Func(v) => Ok(Self::Func(v)),
-            v if T::is(&v) => Ok(Self::Value(T::cast(v)?)),
-            v => <Self as Cast>::error(v),
-        }
-    }
-
+impl<T: Reflect> Reflect for Celled<T> {
     fn describe() -> CastInfo {
-        T::describe() + CastInfo::Type("function")
+        T::describe() + Array::describe() + Func::describe()
+    }
+
+    fn castable(value: &Value) -> bool {
+        Array::castable(value) || Func::castable(value) || T::castable(value)
     }
 }
 
-impl<T: Into<Value>> From<Celled<T>> for Value {
-    fn from(celled: Celled<T>) -> Self {
-        match celled {
-            Celled::Value(value) => value.into(),
-            Celled::Func(func) => func.into(),
+impl<T: IntoValue> IntoValue for Celled<T> {
+    fn into_value(self) -> Value {
+        match self {
+            Self::Value(value) => value.into_value(),
+            Self::Func(func) => func.into_value(),
+            Self::Array(arr) => arr.into_value(),
+        }
+    }
+}
+
+impl<T: FromValue> FromValue for Celled<T> {
+    fn from_value(value: Value) -> StrResult<Self> {
+        match value {
+            Value::Func(v) => Ok(Self::Func(v)),
+            Value::Array(array) => Ok(Self::Array(
+                array.into_iter().map(T::from_value).collect::<StrResult<_>>()?,
+            )),
+            v if T::castable(&v) => Ok(Self::Value(T::from_value(v)?)),
+            v => Err(Self::error(&v)),
         }
     }
 }
 
 impl LocalName for TableElem {
-    fn local_name(&self, lang: Lang) -> &'static str {
+    fn local_name(&self, lang: Lang, _: Option<Region>) -> &'static str {
         match lang {
+            Lang::ALBANIAN => "Tabel",
+            Lang::ARABIC => "جدول",
+            Lang::BOKMÅL => "Tabell",
+            Lang::CHINESE => "表",
+            Lang::CZECH => "Tabulka",
+            Lang::DANISH => "Tabel",
+            Lang::DUTCH => "Tabel",
+            Lang::FILIPINO => "Talaan",
+            Lang::FRENCH => "Tableau",
             Lang::GERMAN => "Tabelle",
+            Lang::ITALIAN => "Tabella",
+            Lang::NYNORSK => "Tabell",
+            Lang::POLISH => "Tabela",
+            Lang::PORTUGUESE => "Tabela",
+            Lang::RUSSIAN => "Таблица",
+            Lang::SLOVENIAN => "Tabela",
+            Lang::SPANISH => "Tabla",
+            Lang::SWEDISH => "Tabell",
+            Lang::TURKISH => "Tablo",
+            Lang::UKRAINIAN => "Таблиця",
+            Lang::VIETNAMESE => "Bảng",
             Lang::ENGLISH | _ => "Table",
         }
     }
 }
+
+impl Figurable for TableElem {}

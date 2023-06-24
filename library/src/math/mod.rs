@@ -5,6 +5,7 @@ mod ctx;
 mod accent;
 mod align;
 mod attach;
+mod cancel;
 mod delimited;
 mod frac;
 mod fragment;
@@ -20,6 +21,7 @@ mod underover;
 pub use self::accent::*;
 pub use self::align::*;
 pub use self::attach::*;
+pub use self::cancel::*;
 pub use self::delimited::*;
 pub use self::frac::*;
 pub use self::matrix::*;
@@ -32,6 +34,7 @@ use ttf_parser::{GlyphId, Rect};
 use typst::eval::{Module, Scope};
 use typst::font::{Font, FontWeight};
 use typst::model::Guard;
+use typst::util::option_eq;
 use unicode_math_class::MathClass;
 
 use self::ctx::*;
@@ -39,7 +42,10 @@ use self::fragment::*;
 use self::row::*;
 use self::spacing::*;
 use crate::layout::{HElem, ParElem, Spacing};
-use crate::meta::{Count, Counter, CounterUpdate, LocalName, Numbering};
+use crate::meta::Supplement;
+use crate::meta::{
+    Count, Counter, CounterUpdate, LocalName, Numbering, Outlinable, Refable,
+};
 use crate::prelude::*;
 use crate::text::{
     families, variant, FontFamily, FontList, LinebreakElem, SpaceElem, TextElem, TextSize,
@@ -53,10 +59,11 @@ pub fn module() -> Module {
 
     // Grouping.
     math.define("lr", LrElem::func());
-    math.define("abs", abs);
-    math.define("norm", norm);
-    math.define("floor", floor);
-    math.define("ceil", ceil);
+    math.define("abs", abs_func());
+    math.define("norm", norm_func());
+    math.define("floor", floor_func());
+    math.define("ceil", ceil_func());
+    math.define("round", round_func());
 
     // Attachments and accents.
     math.define("attach", AttachElem::func());
@@ -69,6 +76,7 @@ pub fn module() -> Module {
     math.define("overbrace", OverbraceElem::func());
     math.define("underbracket", UnderbracketElem::func());
     math.define("overbracket", OverbracketElem::func());
+    math.define("cancel", CancelElem::func());
 
     // Fractions and matrix-likes.
     math.define("frac", FracElem::func());
@@ -78,19 +86,24 @@ pub fn module() -> Module {
     math.define("cases", CasesElem::func());
 
     // Roots.
-    math.define("sqrt", sqrt);
+    math.define("sqrt", sqrt_func());
     math.define("root", RootElem::func());
 
     // Styles.
-    math.define("upright", upright);
-    math.define("bold", bold);
-    math.define("italic", italic);
-    math.define("serif", serif);
-    math.define("sans", sans);
-    math.define("cal", cal);
-    math.define("frak", frak);
-    math.define("mono", mono);
-    math.define("bb", bb);
+    math.define("upright", upright_func());
+    math.define("bold", bold_func());
+    math.define("italic", italic_func());
+    math.define("serif", serif_func());
+    math.define("sans", sans_func());
+    math.define("cal", cal_func());
+    math.define("frak", frak_func());
+    math.define("mono", mono_func());
+    math.define("bb", bb_func());
+
+    math.define("display", display_func());
+    math.define("inline", inline_func());
+    math.define("script", script_func());
+    math.define("sscript", sscript_func());
 
     // Text operators.
     math.define("op", OpElem::func());
@@ -111,7 +124,7 @@ pub fn module() -> Module {
 ///
 /// Can be displayed inline with text or as a separate block.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #set text(font: "New Computer Modern")
 ///
@@ -124,7 +137,7 @@ pub fn module() -> Module {
 /// $ sum_(k=1)^n k = (n(n+1)) / 2 $
 /// ```
 ///
-/// ## Syntax
+/// ## Syntax { #syntax }
 /// This function also has dedicated syntax: Write mathematical markup within
 /// dollar signs to create an equation. Starting and ending the equation with at
 /// least one space lifts it into a separate block that is centered
@@ -133,7 +146,10 @@ pub fn module() -> Module {
 ///
 /// Display: Equation
 /// Category: math
-#[element(Locatable, Synthesize, Show, Finalize, Layout, LayoutMath, Count, LocalName)]
+#[element(
+    Locatable, Synthesize, Show, Finalize, Layout, LayoutMath, Count, LocalName, Refable,
+    Outlinable
+)]
 pub struct EquationElem {
     /// Whether the equation is displayed as a separate block.
     #[default(false)]
@@ -152,19 +168,48 @@ pub struct EquationElem {
     /// ```
     pub numbering: Option<Numbering>,
 
+    /// A supplement for the equation.
+    ///
+    /// For references to equations, this is added before the referenced number.
+    ///
+    /// If a function is specified, it is passed the referenced equation and
+    /// should return content.
+    ///
+    /// ```example
+    /// #set math.equation(numbering: "(1)", supplement: [Eq.])
+    ///
+    /// We define:
+    /// $ phi.alt := (1 + sqrt(5)) / 2 $ <ratio>
+    ///
+    /// With @ratio, we get:
+    /// $ F_n = floor(1 / sqrt(5) phi.alt^n) $
+    /// ```
+    pub supplement: Smart<Option<Supplement>>,
+
     /// The contents of the equation.
     #[required]
     pub body: Content,
 }
 
 impl Synthesize for EquationElem {
-    fn synthesize(&mut self, styles: StyleChain) {
+    fn synthesize(&mut self, vt: &mut Vt, styles: StyleChain) -> SourceResult<()> {
+        // Resolve the supplement.
+        let supplement = match self.supplement(styles) {
+            Smart::Auto => TextElem::packed(self.local_name_in(styles)),
+            Smart::Custom(None) => Content::empty(),
+            Smart::Custom(Some(supplement)) => supplement.resolve(vt, [self.clone()])?,
+        };
+
         self.push_block(self.block(styles));
         self.push_numbering(self.numbering(styles));
+        self.push_supplement(Smart::Custom(Some(Supplement::Content(supplement))));
+
+        Ok(())
     }
 }
 
 impl Show for EquationElem {
+    #[tracing::instrument(name = "EquationElem::show", skip_all)]
     fn show(&self, _: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
         let mut realized = self.clone().pack().guarded(Guard::Base(Self::func()));
         if self.block(styles) {
@@ -185,6 +230,7 @@ impl Finalize for EquationElem {
 }
 
 impl Layout for EquationElem {
+    #[tracing::instrument(name = "EquationElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -251,6 +297,9 @@ impl Layout for EquationElem {
             frame.size_mut().y = ascent + descent;
         }
 
+        // Apply metadata.
+        frame.meta(styles, false);
+
         Ok(Fragment::frame(frame))
     }
 }
@@ -264,11 +313,75 @@ impl Count for EquationElem {
 }
 
 impl LocalName for EquationElem {
-    fn local_name(&self, lang: Lang) -> &'static str {
+    fn local_name(&self, lang: Lang, region: Option<Region>) -> &'static str {
         match lang {
+            Lang::ALBANIAN => "Ekuacion",
+            Lang::ARABIC => "معادلة",
+            Lang::BOKMÅL => "Ligning",
+            Lang::CHINESE if option_eq(region, "TW") => "方程式",
+            Lang::CHINESE => "等式",
+            Lang::CZECH => "Rovnice",
+            Lang::DANISH => "Ligning",
+            Lang::DUTCH => "Vergelijking",
+            Lang::FILIPINO => "Ekwasyon",
+            Lang::FRENCH => "Équation",
             Lang::GERMAN => "Gleichung",
+            Lang::ITALIAN => "Equazione",
+            Lang::NYNORSK => "Likning",
+            Lang::POLISH => "Równanie",
+            Lang::PORTUGUESE => "Equação",
+            Lang::RUSSIAN => "Уравнение",
+            Lang::SLOVENIAN => "Enačba",
+            Lang::SPANISH => "Ecuación",
+            Lang::SWEDISH => "Ekvation",
+            Lang::TURKISH => "Denklem",
+            Lang::UKRAINIAN => "Рівняння",
+            Lang::VIETNAMESE => "Phương trình",
             Lang::ENGLISH | _ => "Equation",
         }
+    }
+}
+
+impl Refable for EquationElem {
+    fn supplement(&self) -> Content {
+        // After synthesis, this should always be custom content.
+        match self.supplement(StyleChain::default()) {
+            Smart::Custom(Some(Supplement::Content(content))) => content,
+            _ => Content::empty(),
+        }
+    }
+
+    fn counter(&self) -> Counter {
+        Counter::of(Self::func())
+    }
+
+    fn numbering(&self) -> Option<Numbering> {
+        self.numbering(StyleChain::default())
+    }
+}
+
+impl Outlinable for EquationElem {
+    fn outline(&self, vt: &mut Vt) -> SourceResult<Option<Content>> {
+        let Some(numbering) = self.numbering(StyleChain::default()) else {
+            return Ok(None);
+        };
+
+        // After synthesis, this should always be custom content.
+        let mut supplement = match self.supplement(StyleChain::default()) {
+            Smart::Custom(Some(Supplement::Content(content))) => content,
+            _ => Content::empty(),
+        };
+
+        if !supplement.is_empty() {
+            supplement += TextElem::packed("\u{a0}");
+        }
+
+        let numbers = self
+            .counter()
+            .at(vt, self.0.location().unwrap())?
+            .display(vt, &numbering)?;
+
+        Ok(Some(supplement + numbers))
     }
 }
 
@@ -277,13 +390,29 @@ pub trait LayoutMath {
 }
 
 impl LayoutMath for EquationElem {
+    #[tracing::instrument(skip(ctx))]
     fn layout_math(&self, ctx: &mut MathContext) -> SourceResult<()> {
         self.body().layout_math(ctx)
     }
 }
 
 impl LayoutMath for Content {
+    #[tracing::instrument(skip(ctx))]
     fn layout_math(&self, ctx: &mut MathContext) -> SourceResult<()> {
+        // Directly layout the body of nested equations instead of handling it
+        // like a normal equation so that things like this work:
+        // ```
+        // #let my = $pi$
+        // $ my r^2 $
+        // ```
+        if let Some(elem) = self.to::<EquationElem>() {
+            return elem.layout_math(ctx);
+        }
+
+        if let Some(realized) = ctx.realize(self)? {
+            return realized.layout_math(ctx);
+        }
+
         if let Some(children) = self.to_sequence() {
             for child in children {
                 child.layout_math(ctx)?;
@@ -292,7 +421,7 @@ impl LayoutMath for Content {
         }
 
         if let Some((elem, styles)) = self.to_styled() {
-            if TextElem::font_in(ctx.styles().chain(&styles))
+            if TextElem::font_in(ctx.styles().chain(styles))
                 != TextElem::font_in(ctx.styles())
             {
                 let frame = ctx.layout_content(self)?;
@@ -330,7 +459,8 @@ impl LayoutMath for Content {
         }
 
         if let Some(elem) = self.to::<TextElem>() {
-            ctx.layout_text(elem)?;
+            let fragment = ctx.layout_text(elem)?;
+            ctx.push(fragment);
             return Ok(());
         }
 

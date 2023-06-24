@@ -1,5 +1,8 @@
+# This is responsible for the fact that certain math functions are grouped
+# together into one documentation page although they are not part of any scope.
+
 - name: variants
-  title: Variants
+  display: Variants
   functions: ["serif", "sans", "frak", "mono", "bb", "cal"]
   description: |
     Alternate typefaces within formulas.
@@ -8,7 +11,7 @@
     math fonts contain multiple variants of each letter.
 
 - name: styles
-  title: Styles
+  display: Styles
   functions: ["upright", "italic", "bold"]
   description: |
     Alternate letterforms within formulas.
@@ -16,8 +19,18 @@
     These functions are distinct from the [`text`]($func/text) function because
     math fonts contain multiple variants of each letter.
 
+- name: sizes
+  display: Sizes
+  functions: ["display", "inline", "script", "sscript"]
+  description: |
+    Forced size styles for expressions within formulas.
+
+    These functions allow manual configuration of the size of equation elements
+    to make them look as in a display/inline equation or as if used in a root or
+    sub/superscripts.
+
 - name: underover
-  title: Under/Over
+  display: Under/Over
   functions: [
     "underline",
     "overline",
@@ -33,12 +46,12 @@
     below or above themselves.
 
 - name: roots
-  title: Roots
+  display: Roots
   functions: ["root", "sqrt"]
   description: Square and non-square roots.
 
 - name: attach
-  title: Attach
+  display: Attach
   functions: ["attach", "scripts", "limits"]
   description: |
     Subscript, superscripts, and limits.
@@ -50,8 +63,8 @@
     the `scripts` and `limits` functions.
 
 - name: lr
-  title: Left/Right
-  functions: ["lr", "abs", "norm", "floor", "ceil"]
+  display: Left/Right
+  functions: ["lr", "abs", "norm", "floor", "ceil", "round"]
   description: |
     Delimiter matching.
 

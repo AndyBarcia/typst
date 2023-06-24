@@ -1,11 +1,12 @@
 //! Operations on values.
 
 use std::cmp::Ordering;
+use std::fmt::Debug;
 
 use ecow::eco_format;
 
 use super::{format_str, Regex, Value};
-use crate::diag::StrResult;
+use crate::diag::{bail, StrResult};
 use crate::geom::{Axes, Axis, GenAlign, Length, Numeric, PartialStroke, Rel, Smart};
 use Value::*;
 
@@ -53,7 +54,7 @@ pub fn pos(value: Value) -> StrResult<Value> {
 /// Compute the negation of a value.
 pub fn neg(value: Value) -> StrResult<Value> {
     Ok(match value {
-        Int(v) => Int(-v),
+        Int(v) => Int(v.checked_neg().ok_or("value is too large")?),
         Float(v) => Float(-v),
         Length(v) => Length(-v),
         Angle(v) => Angle(-v),
@@ -70,7 +71,7 @@ pub fn add(lhs: Value, rhs: Value) -> StrResult<Value> {
         (a, None) => a,
         (None, b) => b,
 
-        (Int(a), Int(b)) => Int(a + b),
+        (Int(a), Int(b)) => Int(a.checked_add(b).ok_or("value is too large")?),
         (Int(a), Float(b)) => Float(a as f64 + b),
         (Float(a), Int(b)) => Float(a + b as f64),
         (Float(a), Float(b)) => Float(a + b),
@@ -108,6 +109,7 @@ pub fn add(lhs: Value, rhs: Value) -> StrResult<Value> {
             Value::dynamic(PartialStroke {
                 paint: Smart::Custom(color.into()),
                 thickness: Smart::Custom(thickness),
+                ..PartialStroke::default()
             })
         }
 
@@ -136,7 +138,7 @@ pub fn add(lhs: Value, rhs: Value) -> StrResult<Value> {
 /// Compute the difference of two values.
 pub fn sub(lhs: Value, rhs: Value) -> StrResult<Value> {
     Ok(match (lhs, rhs) {
-        (Int(a), Int(b)) => Int(a - b),
+        (Int(a), Int(b)) => Int(a.checked_sub(b).ok_or("value is too large")?),
         (Int(a), Float(b)) => Float(a as f64 - b),
         (Float(a), Int(b)) => Float(a - b as f64),
         (Float(a), Float(b)) => Float(a - b),
@@ -164,42 +166,51 @@ pub fn sub(lhs: Value, rhs: Value) -> StrResult<Value> {
 /// Compute the product of two values.
 pub fn mul(lhs: Value, rhs: Value) -> StrResult<Value> {
     Ok(match (lhs, rhs) {
-        (Int(a), Int(b)) => Int(a * b),
+        (Int(a), Int(b)) => Int(a.checked_mul(b).ok_or("value is too large")?),
         (Int(a), Float(b)) => Float(a as f64 * b),
         (Float(a), Int(b)) => Float(a * b as f64),
         (Float(a), Float(b)) => Float(a * b),
 
         (Length(a), Int(b)) => Length(a * b as f64),
         (Length(a), Float(b)) => Length(a * b),
+        (Length(a), Ratio(b)) => Length(a * b.get()),
         (Int(a), Length(b)) => Length(b * a as f64),
         (Float(a), Length(b)) => Length(b * a),
+        (Ratio(a), Length(b)) => Length(b * a.get()),
 
         (Angle(a), Int(b)) => Angle(a * b as f64),
         (Angle(a), Float(b)) => Angle(a * b),
+        (Angle(a), Ratio(b)) => Angle(a * b.get()),
         (Int(a), Angle(b)) => Angle(a as f64 * b),
         (Float(a), Angle(b)) => Angle(a * b),
+        (Ratio(a), Angle(b)) => Angle(a.get() * b),
 
+        (Ratio(a), Ratio(b)) => Ratio(a * b),
         (Ratio(a), Int(b)) => Ratio(a * b as f64),
         (Ratio(a), Float(b)) => Ratio(a * b),
-        (Float(a), Ratio(b)) => Ratio(a * b),
         (Int(a), Ratio(b)) => Ratio(a as f64 * b),
+        (Float(a), Ratio(b)) => Ratio(a * b),
 
         (Relative(a), Int(b)) => Relative(a * b as f64),
         (Relative(a), Float(b)) => Relative(a * b),
+        (Relative(a), Ratio(b)) => Relative(a * b.get()),
         (Int(a), Relative(b)) => Relative(a as f64 * b),
         (Float(a), Relative(b)) => Relative(a * b),
+        (Ratio(a), Relative(b)) => Relative(a.get() * b),
 
-        (Float(a), Fraction(b)) => Fraction(a * b),
         (Fraction(a), Int(b)) => Fraction(a * b as f64),
         (Fraction(a), Float(b)) => Fraction(a * b),
+        (Fraction(a), Ratio(b)) => Fraction(a * b.get()),
         (Int(a), Fraction(b)) => Fraction(a as f64 * b),
+        (Float(a), Fraction(b)) => Fraction(a * b),
+        (Ratio(a), Fraction(b)) => Fraction(a.get() * b),
 
         (Str(a), Int(b)) => Str(a.repeat(b)?),
         (Int(a), Str(b)) => Str(b.repeat(a)?),
         (Array(a), Int(b)) => Array(a.repeat(b)?),
         (Int(a), Array(b)) => Array(b.repeat(a)?),
-        (Content(a), Int(b)) => Content(a.repeat(b)?),
-        (Int(a), Content(b)) => Content(b.repeat(a)?),
+        (Content(a), b @ Int(_)) => Content(a.repeat(b.cast()?)),
+        (a @ Int(_), Content(b)) => Content(b.repeat(a.cast()?)),
 
         (a, b) => mismatch!("cannot multiply {} with {}", a, b),
     })
@@ -208,7 +219,7 @@ pub fn mul(lhs: Value, rhs: Value) -> StrResult<Value> {
 /// Compute the quotient of two values.
 pub fn div(lhs: Value, rhs: Value) -> StrResult<Value> {
     if is_zero(&rhs) {
-        Err("cannot divide by zero")?;
+        bail!("cannot divide by zero");
     }
 
     Ok(match (lhs, rhs) {
@@ -308,11 +319,8 @@ macro_rules! comparison {
     ($name:ident, $op:tt, $($pat:tt)*) => {
         /// Compute how a value compares with another value.
         pub fn $name(lhs: Value, rhs: Value) -> StrResult<Value> {
-            if let Some(ordering) = compare(&lhs, &rhs) {
-                Ok(Bool(matches!(ordering, $($pat)*)))
-            } else {
-                mismatch!(concat!("cannot apply '", $op, "' to {} and {}"), lhs, rhs);
-            }
+            let ordering = compare(&lhs, &rhs)?;
+            Ok(Bool(matches!(ordering, $($pat)*)))
         }
     };
 }
@@ -361,28 +369,34 @@ pub fn equal(lhs: &Value, rhs: &Value) -> bool {
 }
 
 /// Compare two values.
-pub fn compare(lhs: &Value, rhs: &Value) -> Option<Ordering> {
-    match (lhs, rhs) {
-        (Bool(a), Bool(b)) => a.partial_cmp(b),
-        (Int(a), Int(b)) => a.partial_cmp(b),
-        (Float(a), Float(b)) => a.partial_cmp(b),
-        (Length(a), Length(b)) => a.partial_cmp(b),
-        (Angle(a), Angle(b)) => a.partial_cmp(b),
-        (Ratio(a), Ratio(b)) => a.partial_cmp(b),
-        (Relative(a), Relative(b)) => a.partial_cmp(b),
-        (Fraction(a), Fraction(b)) => a.partial_cmp(b),
-        (Str(a), Str(b)) => a.partial_cmp(b),
+pub fn compare(lhs: &Value, rhs: &Value) -> StrResult<Ordering> {
+    Ok(match (lhs, rhs) {
+        (Bool(a), Bool(b)) => a.cmp(b),
+        (Int(a), Int(b)) => a.cmp(b),
+        (Float(a), Float(b)) => try_cmp_values(a, b)?,
+        (Length(a), Length(b)) => try_cmp_values(a, b)?,
+        (Angle(a), Angle(b)) => a.cmp(b),
+        (Ratio(a), Ratio(b)) => a.cmp(b),
+        (Relative(a), Relative(b)) => try_cmp_values(a, b)?,
+        (Fraction(a), Fraction(b)) => a.cmp(b),
+        (Str(a), Str(b)) => a.cmp(b),
 
         // Some technically different things should be comparable.
-        (&Int(a), &Float(b)) => (a as f64).partial_cmp(&b),
-        (&Float(a), &Int(b)) => a.partial_cmp(&(b as f64)),
-        (&Length(a), &Relative(b)) if b.rel.is_zero() => a.partial_cmp(&b.abs),
-        (&Ratio(a), &Relative(b)) if b.abs.is_zero() => a.partial_cmp(&b.rel),
-        (&Relative(a), &Length(b)) if a.rel.is_zero() => a.abs.partial_cmp(&b),
-        (&Relative(a), &Ratio(b)) if a.abs.is_zero() => a.rel.partial_cmp(&b),
+        (Int(a), Float(b)) => try_cmp_values(&(*a as f64), b)?,
+        (Float(a), Int(b)) => try_cmp_values(a, &(*b as f64))?,
+        (Length(a), Relative(b)) if b.rel.is_zero() => try_cmp_values(a, &b.abs)?,
+        (Ratio(a), Relative(b)) if b.abs.is_zero() => a.cmp(&b.rel),
+        (Relative(a), Length(b)) if a.rel.is_zero() => try_cmp_values(&a.abs, b)?,
+        (Relative(a), Ratio(b)) if a.abs.is_zero() => a.rel.cmp(b),
 
-        _ => Option::None,
-    }
+        _ => mismatch!("cannot compare {} and {}", lhs, rhs),
+    })
+}
+
+/// Try to compare two values.
+fn try_cmp_values<T: PartialOrd + Debug>(a: &T, b: &T) -> StrResult<Ordering> {
+    a.partial_cmp(b)
+        .ok_or_else(|| eco_format!("cannot compare {:?} with {:?}", a, b))
 }
 
 /// Test whether one value is "in" another one.

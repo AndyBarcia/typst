@@ -30,7 +30,7 @@ more about their syntax and usage.
 | Bullet list        | `[- item]`               | [`list`]($func/list)         |
 | Numbered list      | `[+ item]`               | [`enum`]($func/enum)         |
 | Term list          | `[/ Term: description]`  | [`terms`]($func/terms)       |
-| Math               | `[$x^2$]`                | [Math]($category/math)     |
+| Math               | `[$x^2$]`                | [Math]($category/math)       |
 | Line break         | `[\]`                    | [`linebreak`]($func/linebreak) |
 | Smart quote        | `['single' or "double"]` | [`smartquote`]($func/smartquote) |
 | Symbol shorthand   | `[~, ---]`               | [Symbols]($category/symbols/sym) |
@@ -52,10 +52,10 @@ follows:
 | Block-level math       | `[$ x^2 $]`              | [Math]($category/math)   |
 | Bottom attachment      | `[$x_1$]`                | [`attach`]($category/math/attach) |
 | Top attachment         | `[$x^2$]`                | [`attach`]($category/math/attach) |
-| Fraction               | `[$1 + (a+b)/5$]`        | [`frac`]($func/frac)     |
-| Line break             | `[$x \ y ]`              | [`linebreak`]($func/linebreak) |
+| Fraction               | `[$1 + (a+b)/5$]`        | [`frac`]($func/math.frac) |
+| Line break             | `[$x \ y$]`              | [`linebreak`]($func/linebreak) |
 | Alignment point        | `[$x &= 2 \ &= 3$]`      | [Math]($category/math)   |
-| Variable access        | `[$pi$]`                 | [Math]($category/math)   |
+| Variable access        | `[$#x$, $pi$]`           | [Math]($category/math)   |
 | Field access           | `[$arrow.r.long$]`       | [Scripting]($scripting/#fields) |
 | Implied multiplication | `[$x y$]`                | [Math]($category/math)   |
 | Symbol shorthand       | `[$->, !=$]`             | [Symbols]($category/symbols/sym) |
@@ -70,38 +70,38 @@ Within code blocks and expressions, new expressions can start without a leading
 `#` character. Many syntactic elements are specific to expressions. Below is
 a table listing all syntax that is available in code mode:
 
-| Name                     | Example                       | See                                                  |
-| ------------------------ | ----------------------------- | ---------------------------------------------------- |
-| Variable access          | `{x}`                         | [Scripting]($scripting/#blocks)       |
-| Any literal              | `{1pt, "hey"}`                | [Types]($types)                       |
-| Code block               | `{{ let x = 1; x + 2 }}`      | [Scripting]($scripting/#blocks)       |
-| Content block            | `{[*Hello*]}`                 | [Scripting]($scripting/#blocks)       |
-| Parenthesized expression | `{(1 + 2)}`                   | [Scripting]($scripting/#blocks)       |
-| Array                    | `{(1, 2, 3)}`                 | [Array]($type/array)                 |
-| Dictionary               | `{(a: "hi", b: 2)}`           | [Dictionary]($type/dictionary)       |
-| Unary operator           | `{-x}`                        | [Scripting]($scripting/#operators)    |
-| Binary operator          | `{x + y}`                     | [Scripting]($scripting/#operators)    |
-| Assignment               | `{x = 1}`                     | [Scripting]($scripting/#operators)    |
-| Field access             | `{x.y}`                       | [Scripting]($scripting/#fields)       |
-| Method call              | `{x.flatten()}`               | [Scripting]($scripting/#methods)      |
-| Function call            | `{min(x, y)}`                 | [Function]($type/function)           |
-| Unnamed function         | `{(x, y) => x + y}`           | [Function]($type/function)           |
-| Let binding              | `{let x = 1}`                 | [Scripting]($scripting/#bindings)     |
-| Named function           | `{let f(x) = 2 * x}`          | [Function]($type/function)           |
-| Set rule                 | `{set text(14pt)}`            | [Styling]($styling/#set-rules)        |
-| Set-if rule              | `{set text(..) if .. }`       | [Styling]($styling/#set-rules)        |
-| Show-set rule            | `{show par: set block(..)}`   | [Styling]($styling/#show-rules)       |
-| Show rule with function  | `{show raw: it => {..}}`      | [Styling]($styling/#show-rules)        |
-| Show-everything rule     | `{show: columns.with(2)}`      | [Styling]($styling/#show-rules)        |
+| Name                     | Example                       | See                                |
+| ------------------------ | ----------------------------- | ---------------------------------- |
+| Variable access          | `{x}`                         | [Scripting]($scripting/#blocks)    |
+| Any literal              | `{1pt, "hey"}`                | [Types]($types)                    |
+| Code block               | `{{ let x = 1; x + 2 }}`      | [Scripting]($scripting/#blocks)    |
+| Content block            | `{[*Hello*]}`                 | [Scripting]($scripting/#blocks)    |
+| Parenthesized expression | `{(1 + 2)}`                   | [Scripting]($scripting/#blocks)    |
+| Array                    | `{(1, 2, 3)}`                 | [Array]($type/array)               |
+| Dictionary               | `{(a: "hi", b: 2)}`           | [Dictionary]($type/dictionary)     |
+| Unary operator           | `{-x}`                        | [Scripting]($scripting/#operators) |
+| Binary operator          | `{x + y}`                     | [Scripting]($scripting/#operators) |
+| Assignment               | `{x = 1}`                     | [Scripting]($scripting/#operators) |
+| Field access             | `{x.y}`                       | [Scripting]($scripting/#fields)    |
+| Method call              | `{x.flatten()}`               | [Scripting]($scripting/#methods)   |
+| Function call            | `{min(x, y)}`                 | [Function]($type/function)         |
+| Unnamed function         | `{(x, y) => x + y}`           | [Function]($type/function)         |
+| Let binding              | `{let x = 1}`                 | [Scripting]($scripting/#bindings)  |
+| Named function           | `{let f(x) = 2 * x}`          | [Function]($type/function)         |
+| Set rule                 | `{set text(14pt)}`            | [Styling]($styling/#set-rules)     |
+| Set-if rule              | `{set text(..) if .. }`       | [Styling]($styling/#set-rules)     |
+| Show-set rule            | `{show par: set block(..)}`   | [Styling]($styling/#show-rules)    |
+| Show rule with function  | `{show raw: it => {..}}`      | [Styling]($styling/#show-rules)    |
+| Show-everything rule     | `{show: columns.with(2)}`     | [Styling]($styling/#show-rules)    |
 | Conditional              | `{if x == 1 {..} else {..}}`  | [Scripting]($scripting/#conditionals) |
-| For loop                 | `{for x in (1, 2, 3) {..}}`   | [Scripting]($scripting/#loops)        |
-| While loop               | `{while x < 10 {..}}`         | [Scripting]($scripting/#loops)        |
-| Loop control flow        | `{break, continue}`           | [Scripting]($scripting/#loops)        |
-| Return from function     | `{return x}`                  | [Function]($type/function)           |
-| Include module           | `{include "bar.typ"}`         | [Scripting]($scripting/#modules)      |
-| Import module            | `{import "bar.typ"}`          | [Scripting]($scripting/#modules)      |
-| Import items from module | `{import "bar.typ": a, b, c}` | [Scripting]($scripting/#modules)      |
-| Comment                  | `[/* block */, // line]`      | [Below](#comments)                                   |
+| For loop                 | `{for x in (1, 2, 3) {..}}`   | [Scripting]($scripting/#loops)     |
+| While loop               | `{while x < 10 {..}}`         | [Scripting]($scripting/#loops)     |
+| Loop control flow        | `{break, continue}`           | [Scripting]($scripting/#loops)     |
+| Return from function     | `{return x}`                  | [Function]($type/function)         |
+| Include module           | `{include "bar.typ"}`         | [Scripting]($scripting/#modules)   |
+| Import module            | `{import "bar.typ"}`          | [Scripting]($scripting/#modules)   |
+| Import items from module | `{import "bar.typ": a, b, c}` | [Scripting]($scripting/#modules)   |
+| Comment                  | `[/* block */, // line]`      | [Below](#comments)                 |
 
 ## Comments { #comments }
 Comments are ignored by Typst and will not be included in the output. This
@@ -126,10 +126,10 @@ Our study design is as follows:
 ```
 
 ## Escape sequences { #escapes }
-Escape sequences are used to insert special characters that are otherwise have
-special meaning in Typst. To escape a character, precede it with a backslash. To
-insert any Unicode codepoint, you can write a hexadecimal escape sequence:
-`[\u{1f600}]`. The same kind of escape sequences also work in
+Escape sequences are used to insert special characters that are hard to type or
+otherwise have special meaning in Typst. To escape a character, precede it with
+a backslash. To insert any Unicode codepoint, you can write a hexadecimal
+escape sequence: `[\u{1f600}]`. The same kind of escape sequences also work in
 [strings]($type/string).
 
 ```example

@@ -10,21 +10,22 @@ pub use comemo::{Track, Tracked, TrackedMut};
 #[doc(no_inline)]
 pub use ecow::{eco_format, EcoString};
 #[doc(no_inline)]
-pub use typst::diag::{bail, error, At, SourceResult, StrResult};
+pub use typst::diag::{bail, error, At, Hint, SourceResult, StrResult};
 #[doc(no_inline)]
 pub use typst::doc::*;
 #[doc(no_inline)]
 pub use typst::eval::{
-    array, cast_from_value, cast_to_value, dict, format_str, func, Args, Array, Cast,
-    CastInfo, Dict, Func, Never, Str, Symbol, Value, Vm,
+    array, cast, dict, format_str, func, Args, Array, AutoValue, Cast, Dict, FromValue,
+    Func, IntoValue, Never, NoneValue, Scope, Str, Symbol, Type, Value, Vm,
 };
 #[doc(no_inline)]
 pub use typst::geom::*;
 #[doc(no_inline)]
 pub use typst::model::{
     element, Behave, Behaviour, Construct, Content, ElemFunc, Element, Finalize, Fold,
-    Introspector, Label, Locatable, Location, MetaElem, Resolve, Selector, Set, Show,
-    StabilityProvider, StyleChain, StyleVec, Styles, Synthesize, Unlabellable, Vt,
+    Introspector, Label, Locatable, LocatableSelector, Location, Locator, MetaElem,
+    PlainText, Resolve, Selector, Set, Show, StyleChain, StyleVec, Styles, Synthesize,
+    Unlabellable, Vt,
 };
 #[doc(no_inline)]
 pub use typst::syntax::{Span, Spanned};

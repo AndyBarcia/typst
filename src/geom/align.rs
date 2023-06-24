@@ -106,6 +106,18 @@ impl From<Align> for GenAlign {
     }
 }
 
+impl From<HorizontalAlign> for GenAlign {
+    fn from(align: HorizontalAlign) -> Self {
+        align.0
+    }
+}
+
+impl From<VerticalAlign> for GenAlign {
+    fn from(align: VerticalAlign) -> Self {
+        align.0
+    }
+}
+
 impl Debug for GenAlign {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
@@ -116,31 +128,33 @@ impl Debug for GenAlign {
     }
 }
 
-cast_from_value! {
-    GenAlign: "alignment",
+cast! {
+    type GenAlign: "alignment",
 }
 
-cast_from_value! {
-    Axes<GenAlign>: "2d alignment",
+cast! {
+    type Axes<GenAlign>: "2d alignment",
 }
 
-cast_from_value! {
+cast! {
+    Axes<Align>,
+    self => self.map(GenAlign::from).into_value(),
+}
+
+cast! {
     Axes<Option<GenAlign>>,
+    self => match (self.x, self.y) {
+        (Some(x), Some(y)) => Axes::new(x, y).into_value(),
+        (Some(x), None) => x.into_value(),
+        (None, Some(y)) => y.into_value(),
+        (None, None) => Value::None,
+    },
     align: GenAlign => {
         let mut aligns = Axes::default();
         aligns.set(align.axis(), Some(align));
         aligns
     },
     aligns: Axes<GenAlign> => aligns.map(Some),
-}
-
-cast_to_value! {
-    v: Axes<Option<GenAlign>> => match (v.x, v.y) {
-        (Some(x), Some(y)) => Axes::new(x, y).into(),
-        (Some(x), None) => x.into(),
-        (None, Some(y)) => y.into(),
-        (None, None) => Value::None,
-    }
 }
 
 impl From<Axes<GenAlign>> for Axes<Option<GenAlign>> {
@@ -182,4 +196,44 @@ impl Fold for GenAlign {
     fn fold(self, _: Self::Output) -> Self::Output {
         self
     }
+}
+
+impl Fold for Align {
+    type Output = Self;
+
+    fn fold(self, _: Self::Output) -> Self::Output {
+        self
+    }
+}
+
+/// Utility struct to restrict a passed alignment value to the horizontal axis
+/// on cast.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct HorizontalAlign(pub GenAlign);
+
+cast! {
+    HorizontalAlign,
+    self => self.0.into_value(),
+    align: GenAlign => {
+        if align.axis() != Axis::X {
+            bail!("alignment must be horizontal");
+        }
+        Self(align)
+    },
+}
+
+/// Utility struct to restrict a passed alignment value to the vertical axis on
+/// cast.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct VerticalAlign(pub GenAlign);
+
+cast! {
+    VerticalAlign,
+    self => self.0.into_value(),
+    align: GenAlign => {
+        if align.axis() != Axis::Y {
+            bail!("alignment must be vertical");
+        }
+        Self(align)
+    },
 }

@@ -33,6 +33,7 @@
 //! [raster images]: export::render
 
 #![recursion_limit = "1000"]
+#![allow(clippy::comparison_chain)]
 
 extern crate self as typst;
 
@@ -53,25 +54,36 @@ pub mod syntax;
 
 use std::path::Path;
 
-use comemo::{Prehashed, Track};
+use comemo::{Prehashed, Track, TrackedMut};
 
 use crate::diag::{FileResult, SourceResult};
 use crate::doc::Document;
-use crate::eval::{Library, Route, Tracer};
+use crate::eval::{Datetime, Library, Route, Tracer};
 use crate::font::{Font, FontBook};
 use crate::syntax::{Source, SourceId};
 use crate::util::Buffer;
 
 /// Compile a source file into a fully layouted document.
-pub fn compile(world: &(dyn World + 'static)) -> SourceResult<Document> {
-    // Evaluate the source file into a module.
+#[tracing::instrument(skip(world))]
+pub fn compile(world: &dyn World) -> SourceResult<Document> {
     let route = Route::default();
     let mut tracer = Tracer::default();
-    let module =
-        eval::eval(world.track(), route.track(), tracer.track_mut(), world.main())?;
+
+    // Call `track` just once to keep comemo's ID stable.
+    let world = world.track();
+    let mut tracer = tracer.track_mut();
+
+    // Evaluate the source file into a module.
+    tracing::info!("Starting evaluation");
+    let module = eval::eval(
+        world,
+        route.track(),
+        TrackedMut::reborrow_mut(&mut tracer),
+        world.main(),
+    )?;
 
     // Typeset the module's contents.
-    model::typeset(world.track(), tracer.track_mut(), &module.content())
+    model::typeset(world, tracer, &module.content())
 }
 
 /// The environment in which typesetting occurs.
@@ -104,4 +116,10 @@ pub trait World {
 
     /// Try to access a file at a path.
     fn file(&self, path: &Path) -> FileResult<Buffer>;
+
+    /// Get the current date.
+    ///
+    /// If no offset is specified, the local date should be chosen. Otherwise,
+    /// the UTC date should be chosen with the corresponding offset in hours.
+    fn today(&self, offset: Option<i64>) -> Option<Datetime>;
 }

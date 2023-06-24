@@ -1,28 +1,36 @@
+#![allow(clippy::comparison_chain)]
+
 use std::cell::{RefCell, RefMut};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::OsStr;
-use std::fs::{self, File};
-use std::io::Read;
+use std::fmt::Write as FmtWrite;
+use std::fs;
+use std::io::{self, Write};
+use std::iter;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use clap::Parser;
 use comemo::{Prehashed, Track};
 use elsa::FrozenVec;
-use once_cell::unsync::OnceCell;
+use oxipng::{InFile, Options, OutFile};
+use rayon::iter::{ParallelBridge, ParallelIterator};
+use std::cell::OnceCell;
 use tiny_skia as sk;
-use typst::diag::{bail, FileError, FileResult};
+use unscanny::Scanner;
+use walkdir::WalkDir;
+
+use typst::diag::{bail, FileError, FileResult, StrResult};
 use typst::doc::{Document, Frame, FrameItem, Meta};
-use typst::eval::{func, Library, Value};
+use typst::eval::{eco_format, func, Datetime, Library, NoneValue, Value};
 use typst::font::{Font, FontBook};
-use typst::geom::{Abs, Color, RgbaColor, Sides, Smart};
+use typst::geom::{Abs, Color, RgbaColor, Smart};
 use typst::syntax::{Source, SourceId, Span, SyntaxNode};
 use typst::util::{Buffer, PathExt};
 use typst::World;
-use typst_library::layout::PageElem;
+use typst_library::layout::{Margin, PageElem};
 use typst_library::text::{TextElem, TextSize};
-use unscanny::Scanner;
-use walkdir::WalkDir;
 
 const TYP_DIR: &str = "typ";
 const REF_DIR: &str = "ref";
@@ -31,109 +39,38 @@ const PDF_DIR: &str = "pdf";
 const FONT_DIR: &str = "../assets/fonts";
 const FILE_DIR: &str = "../assets/files";
 
-fn main() {
-    let args = Args::new(env::args().skip(1));
-    let mut filtered = Vec::new();
-
-    // Since different tests can affect each other through the memoization
-    // cache, a deterministic order is important for reproducibility.
-    for entry in WalkDir::new("typ").sort_by_file_name() {
-        let entry = entry.unwrap();
-        if entry.depth() == 0 {
-            continue;
-        }
-
-        if entry.path().starts_with("typ/benches") {
-            continue;
-        }
-
-        let src_path = entry.into_path();
-        if src_path.extension() != Some(OsStr::new("typ")) {
-            continue;
-        }
-
-        if args.matches(&src_path) {
-            filtered.push(src_path);
-        }
-    }
-
-    let len = filtered.len();
-    if len == 1 {
-        println!("Running test ...");
-    } else if len > 1 {
-        println!("Running {len} tests");
-    }
-
-    // Create loader and context.
-    let mut world = TestWorld::new(args.print);
-
-    // Run all the tests.
-    let mut ok = 0;
-    for src_path in filtered {
-        let path = src_path.strip_prefix(TYP_DIR).unwrap();
-        let png_path = Path::new(PNG_DIR).join(path).with_extension("png");
-        let ref_path = Path::new(REF_DIR).join(path).with_extension("png");
-        let pdf_path =
-            args.pdf.then(|| Path::new(PDF_DIR).join(path).with_extension("pdf"));
-
-        ok += test(&mut world, &src_path, &png_path, &ref_path, pdf_path.as_deref())
-            as usize;
-    }
-
-    if len > 1 {
-        println!("{ok} / {len} tests passed.");
-    }
-
-    if ok < len {
-        std::process::exit(1);
-    }
-}
-
-/// Parsed command line arguments.
+#[derive(Debug, Clone, Parser)]
+#[clap(name = "typst-test", author)]
 struct Args {
     filter: Vec<String>,
+    /// runs only the specified subtest
+    #[arg(short, long)]
+    #[arg(allow_hyphen_values = true)]
+    subtest: Option<isize>,
+    #[arg(long)]
     exact: bool,
+    #[arg(long, default_value_t = env::var_os("UPDATE_EXPECT").is_some())]
+    update: bool,
+    #[arg(long)]
     pdf: bool,
+    #[command(flatten)]
     print: PrintConfig,
+    #[arg(long)]
+    nocapture: bool, // simply ignores the argument
 }
 
 /// Which things to print out for debugging.
-#[derive(Default, Copy, Clone, Eq, PartialEq)]
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Parser)]
 struct PrintConfig {
+    #[arg(long)]
     syntax: bool,
+    #[arg(long)]
     model: bool,
+    #[arg(long)]
     frames: bool,
 }
 
 impl Args {
-    fn new(args: impl Iterator<Item = String>) -> Self {
-        let mut filter = Vec::new();
-        let mut exact = false;
-        let mut pdf = false;
-        let mut print = PrintConfig::default();
-
-        for arg in args {
-            match arg.as_str() {
-                // Ignore this, its for cargo.
-                "--nocapture" => {}
-                // Match only the exact filename.
-                "--exact" => exact = true,
-                // Generate PDFs.
-                "--pdf" => pdf = true,
-                // Debug print the syntax trees.
-                "--syntax" => print.syntax = true,
-                // Debug print the model.
-                "--model" => print.model = true,
-                // Debug print the frames.
-                "--frames" => print.frames = true,
-                // Everything else is a file filter.
-                _ => filter.push(arg),
-            }
-        }
-
-        Self { filter, exact, pdf, print }
-    }
-
     fn matches(&self, path: &Path) -> bool {
         if self.exact {
             let name = path.file_name().unwrap().to_string_lossy();
@@ -145,32 +82,92 @@ impl Args {
     }
 }
 
+fn main() {
+    let args = Args::parse();
+
+    // Create loader and context.
+    let world = TestWorld::new(args.print);
+
+    println!("Running tests...");
+    let results = WalkDir::new("typ")
+        .into_iter()
+        .par_bridge()
+        .filter_map(|entry| {
+            let entry = entry.unwrap();
+            if entry.depth() == 0 {
+                return None;
+            }
+
+            if entry.path().starts_with("typ/benches") {
+                return None;
+            }
+
+            let src_path = entry.into_path();
+            if src_path.extension() != Some(OsStr::new("typ")) {
+                return None;
+            }
+
+            if args.matches(&src_path) {
+                Some(src_path)
+            } else {
+                None
+            }
+        })
+        .map_with(world, |world, src_path| {
+            let path = src_path.strip_prefix(TYP_DIR).unwrap();
+            let png_path = Path::new(PNG_DIR).join(path).with_extension("png");
+            let ref_path = Path::new(REF_DIR).join(path).with_extension("png");
+            let pdf_path =
+                args.pdf.then(|| Path::new(PDF_DIR).join(path).with_extension("pdf"));
+
+            test(world, &src_path, &png_path, &ref_path, pdf_path.as_deref(), &args)
+                as usize
+        })
+        .collect::<Vec<_>>();
+
+    let len = results.len();
+    let ok = results.iter().sum::<usize>();
+    if len > 1 {
+        println!("{ok} / {len} tests passed.");
+    }
+
+    if ok != len {
+        println!(
+            "Set the UPDATE_EXPECT environment variable or pass the \
+             --update flag to update the reference image(s)."
+        );
+    }
+
+    if ok < len {
+        std::process::exit(1);
+    }
+}
+
 fn library() -> Library {
     /// Display: Test
     /// Category: test
-    /// Returns:
     #[func]
-    fn test(lhs: Value, rhs: Value) -> Value {
+    fn test(lhs: Value, rhs: Value) -> StrResult<NoneValue> {
         if lhs != rhs {
-            bail!(args.span, "Assertion failed: {:?} != {:?}", lhs, rhs,);
+            bail!("Assertion failed: {lhs:?} != {rhs:?}");
         }
-        Value::None
+        Ok(NoneValue)
     }
 
     /// Display: Print
     /// Category: test
-    /// Returns:
     #[func]
-    fn print(#[variadic] values: Vec<Value>) -> Value {
-        print!("> ");
+    fn print(#[variadic] values: Vec<Value>) -> NoneValue {
+        let mut stdout = io::stdout().lock();
+        write!(stdout, "> ").unwrap();
         for (i, value) in values.into_iter().enumerate() {
             if i > 0 {
-                print!(", ")
+                write!(stdout, ", ").unwrap();
             }
-            print!("{value:?}");
+            write!(stdout, "{value:?}").unwrap();
         }
-        println!();
-        Value::None
+        writeln!(stdout).unwrap();
+        NoneValue
     }
 
     let mut lib = typst_library::build();
@@ -181,14 +178,14 @@ fn library() -> Library {
     lib.styles
         .set(PageElem::set_width(Smart::Custom(Abs::pt(120.0).into())));
     lib.styles.set(PageElem::set_height(Smart::Auto));
-    lib.styles.set(PageElem::set_margin(Sides::splat(Some(Smart::Custom(
+    lib.styles.set(PageElem::set_margin(Margin::splat(Some(Smart::Custom(
         Abs::pt(10.0).into(),
     )))));
     lib.styles.set(TextElem::set_size(TextSize(Abs::pt(10.0).into())));
 
     // Hook up helpers into the global scope.
-    lib.global.scope_mut().define("test", test);
-    lib.global.scope_mut().define("print", print);
+    lib.global.scope_mut().define("test", test_func());
+    lib.global.scope_mut().define("print", print_func());
     lib.global
         .scope_mut()
         .define("conifer", RgbaColor::new(0x9f, 0xEB, 0x52, 0xFF));
@@ -210,7 +207,21 @@ struct TestWorld {
     main: SourceId,
 }
 
-#[derive(Default)]
+impl Clone for TestWorld {
+    fn clone(&self) -> Self {
+        Self {
+            print: self.print,
+            library: self.library.clone(),
+            book: self.book.clone(),
+            fonts: self.fonts.clone(),
+            paths: self.paths.clone(),
+            sources: FrozenVec::from_iter(self.sources.iter().cloned().map(Box::new)),
+            main: self.main,
+        }
+    }
+}
+
+#[derive(Default, Clone)]
 struct PathSlot {
     source: OnceCell<FileResult<SourceId>>,
     buffer: OnceCell<FileResult<Buffer>>,
@@ -226,7 +237,7 @@ impl TestWorld {
             .filter_map(|e| e.ok())
             .filter(|entry| entry.file_type().is_file())
         {
-            let data = std::fs::read(entry.path()).unwrap();
+            let data = fs::read(entry.path()).unwrap();
             fonts.extend(Font::iter(data.into()));
         }
 
@@ -267,7 +278,7 @@ impl World for TestWorld {
     }
 
     fn source(&self, id: SourceId) -> &Source {
-        &self.sources[id.into_u16() as usize]
+        &self.sources[id.as_u16() as usize]
     }
 
     fn book(&self) -> &Prehashed<FontBook> {
@@ -284,6 +295,10 @@ impl World for TestWorld {
             .get_or_init(|| read(path).map(Buffer::from))
             .clone()
     }
+
+    fn today(&self, _: Option<i64>) -> Option<Datetime> {
+        Some(Datetime::from_ymd(1970, 1, 1).unwrap())
+    }
 }
 
 impl TestWorld {
@@ -291,7 +306,7 @@ impl TestWorld {
         let slot = self.slot(path);
         let id = if let Some(&Ok(id)) = slot.source.get() {
             drop(slot);
-            self.sources.as_mut()[id.into_u16() as usize].replace(text);
+            self.sources.as_mut()[id.as_u16() as usize].replace(text);
             id
         } else {
             let id = self.insert(path, text);
@@ -325,13 +340,10 @@ fn read(path: &Path) -> FileResult<Vec<u8>> {
         .unwrap_or_else(|_| path.into());
 
     let f = |e| FileError::from_io(e, &suffix);
-    let mut file = File::open(&path).map_err(f)?;
-    if file.metadata().map_err(f)?.is_file() {
-        let mut data = vec![];
-        file.read_to_end(&mut data).map_err(f)?;
-        Ok(data)
-    } else {
+    if fs::metadata(path).map_err(f)?.is_dir() {
         Err(FileError::IsDirectory)
+    } else {
+        fs::read(path).map_err(f)
     }
 }
 
@@ -341,21 +353,47 @@ fn test(
     png_path: &Path,
     ref_path: &Path,
     pdf_path: Option<&Path>,
+    args: &Args,
 ) -> bool {
+    struct PanicGuard<'a>(&'a Path);
+    impl Drop for PanicGuard<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                println!("Panicked in {}", self.0.display());
+            }
+        }
+    }
+
     let name = src_path.strip_prefix(TYP_DIR).unwrap_or(src_path);
-    println!("Testing {}", name.display());
-
     let text = fs::read_to_string(src_path).unwrap();
+    let _guard = PanicGuard(name);
 
+    let mut output = String::new();
     let mut ok = true;
+    let mut updated = false;
     let mut frames = vec![];
     let mut line = 0;
-    let mut compare_ref = true;
+    let mut compare_ref = None;
+    let mut validate_hints = None;
     let mut compare_ever = false;
     let mut rng = LinearShift::new();
 
-    let parts: Vec<_> = text.split("\n---").collect();
+    let parts: Vec<_> = text
+        .split("\n---")
+        .map(|s| s.strip_suffix('\r').unwrap_or(s))
+        .collect();
+
     for (i, &part) in parts.iter().enumerate() {
+        if let Some(x) = args.subtest {
+            let x = usize::try_from(
+                x.rem_euclid(isize::try_from(parts.len()).unwrap_or_default()),
+            )
+            .unwrap();
+            if x != i {
+                writeln!(output, "  Skipped subtest {i}.").unwrap();
+                continue;
+            }
+        }
         let is_header = i == 0
             && parts.len() > 1
             && part
@@ -364,13 +402,22 @@ fn test(
 
         if is_header {
             for line in part.lines() {
-                if line.starts_with("// Ref: false") {
-                    compare_ref = false;
-                }
+                compare_ref = get_flag_metadata(line, "Ref").or(compare_ref);
+                validate_hints = get_flag_metadata(line, "Hints").or(validate_hints);
             }
         } else {
-            let (part_ok, compare_here, part_frames) =
-                test_part(world, src_path, part.into(), i, compare_ref, line, &mut rng);
+            let (part_ok, compare_here, part_frames) = test_part(
+                &mut output,
+                world,
+                src_path,
+                part.into(),
+                i,
+                compare_ref.unwrap_or(true),
+                validate_hints.unwrap_or(true),
+                line,
+                &mut rng,
+            );
+
             ok &= part_ok;
             compare_ever |= compare_here;
             frames.extend(part_frames);
@@ -383,18 +430,18 @@ fn test(
     if compare_ever {
         if let Some(pdf_path) = pdf_path {
             let pdf_data = typst::export::pdf(&document);
-            fs::create_dir_all(&pdf_path.parent().unwrap()).unwrap();
+            fs::create_dir_all(pdf_path.parent().unwrap()).unwrap();
             fs::write(pdf_path, pdf_data).unwrap();
         }
 
         if world.print.frames {
             for frame in &document.pages {
-                println!("Frame:\n{:#?}\n", frame);
+                writeln!(output, "{:#?}\n", frame).unwrap();
             }
         }
 
         let canvas = render(&document.pages);
-        fs::create_dir_all(&png_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(png_path.parent().unwrap()).unwrap();
         canvas.save_png(png_path).unwrap();
 
         if let Ok(ref_pixmap) = sk::Pixmap::load_png(ref_path) {
@@ -406,31 +453,70 @@ fn test(
                     .zip(ref_pixmap.data())
                     .any(|(&a, &b)| a.abs_diff(b) > 2)
             {
-                println!("  Does not match reference image. ❌");
-                ok = false;
+                if args.update {
+                    update_image(png_path, ref_path);
+                    updated = true;
+                } else {
+                    writeln!(output, "  Does not match reference image.").unwrap();
+                    ok = false;
+                }
             }
         } else if !document.pages.is_empty() {
-            println!("  Failed to open reference image. ❌");
-            ok = false;
+            if args.update {
+                update_image(png_path, ref_path);
+                updated = true;
+            } else {
+                writeln!(output, "  Failed to open reference image.").unwrap();
+                ok = false;
+            }
         }
     }
 
-    if ok {
-        if world.print == PrintConfig::default() {
-            print!("\x1b[1A");
+    {
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(name.to_string_lossy().as_bytes()).unwrap();
+        if ok {
+            writeln!(stdout, " ✔").unwrap();
+        } else {
+            writeln!(stdout, " ❌").unwrap();
         }
-        println!("Testing {} ✔", name.display());
+        if updated {
+            writeln!(stdout, "  Updated reference image.").unwrap();
+        }
+        if !output.is_empty() {
+            stdout.write_all(output.as_bytes()).unwrap();
+        }
     }
 
     ok
 }
 
+fn get_metadata<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    line.strip_prefix(eco_format!("// {key}: ").as_str())
+}
+
+fn get_flag_metadata(line: &str, key: &str) -> Option<bool> {
+    get_metadata(line, key).map(|value| value == "true")
+}
+
+fn update_image(png_path: &Path, ref_path: &Path) {
+    oxipng::optimize(
+        &InFile::Path(png_path.to_owned()),
+        &OutFile::Path(Some(ref_path.to_owned())),
+        &Options::max_compression(),
+    )
+    .unwrap();
+}
+
+#[allow(clippy::too_many_arguments)]
 fn test_part(
+    output: &mut String,
     world: &mut TestWorld,
     src_path: &Path,
     text: String,
     i: usize,
     compare_ref: bool,
+    validate_hints: bool,
     line: usize,
     rng: &mut LinearShift,
 ) -> (bool, bool, Vec<Frame>) {
@@ -439,14 +525,16 @@ fn test_part(
     let id = world.set(src_path, text);
     let source = world.source(id);
     if world.print.syntax {
-        println!("Syntax Tree:\n{:#?}\n", source.root())
+        writeln!(output, "Syntax Tree:\n{:#?}\n", source.root()).unwrap();
     }
 
-    let (local_compare_ref, mut ref_errors) = parse_metadata(&source);
-    let compare_ref = local_compare_ref.unwrap_or(compare_ref);
+    let metadata = parse_part_metadata(source);
+    let compare_ref = metadata.part_configuration.compare_ref.unwrap_or(compare_ref);
+    let validate_hints =
+        metadata.part_configuration.validate_hints.unwrap_or(validate_hints);
 
-    ok &= test_spans(source.root());
-    ok &= test_reparse(world.source(id).text(), i, rng);
+    ok &= test_spans(output, source.root());
+    ok &= test_reparse(output, world.source(id).text(), i, rng);
 
     if world.print.model {
         let world = (world as &dyn World).track();
@@ -454,7 +542,7 @@ fn test_part(
         let mut tracer = typst::eval::Tracer::default();
         let module =
             typst::eval::eval(world, route.track(), tracer.track_mut(), source).unwrap();
-        println!("Model:\n{:#?}\n", module.content());
+        writeln!(output, "Model:\n{:#?}\n", module.content()).unwrap();
     }
 
     let (mut frames, errors) = match typst::compile(world) {
@@ -468,86 +556,159 @@ fn test_part(
     }
 
     // Map errors to range and message format, discard traces and errors from
-    // other files.
-    let mut errors: Vec<_> = errors
+    // other files, collect hints.
+    //
+    // This has one caveat: due to the format of the expected hints, we can not
+    // verify if a hint belongs to a error or not. That should be irrelevant
+    // however, as the line of the hint is still verified.
+    let actual_errors_and_hints: HashSet<UserOutput> = errors
         .into_iter()
         .filter(|error| error.span.source() == id)
-        .map(|error| (error.range(world), error.message.to_string()))
+        .flat_map(|error| {
+            let output_error =
+                UserOutput::Error(error.range(world), error.message.replace('\\', "/"));
+            let hints = error
+                .hints
+                .iter()
+                .filter(|_| validate_hints) // No unexpected hints should be verified if disabled.
+                .map(|hint| UserOutput::Hint(error.range(world), hint.to_string()));
+            iter::once(output_error).chain(hints).collect::<Vec<_>>()
+        })
         .collect();
 
-    errors.sort_by_key(|error| error.0.start);
-    ref_errors.sort_by_key(|error| error.0.start);
+    // Basically symmetric_difference, but we need to know where an item is coming from.
+    let mut unexpected_outputs = actual_errors_and_hints
+        .difference(&metadata.invariants)
+        .collect::<Vec<_>>();
+    let mut missing_outputs = metadata
+        .invariants
+        .difference(&actual_errors_and_hints)
+        .collect::<Vec<_>>();
 
-    if errors != ref_errors {
-        println!("  Subtest {i} does not match expected errors. ❌");
+    unexpected_outputs.sort_by_key(|&o| o.start());
+    missing_outputs.sort_by_key(|&o| o.start());
+
+    // This prints all unexpected emits first, then all missing emits.
+    // Is this reasonable or subject to change?
+    if !(unexpected_outputs.is_empty() && missing_outputs.is_empty()) {
+        writeln!(output, "  Subtest {i} does not match expected errors.").unwrap();
         ok = false;
 
-        let source = world.source(id);
-        for error in errors.iter() {
-            if !ref_errors.contains(error) {
-                print!("    Not annotated | ");
-                print_error(&source, line, error);
-            }
+        for unexpected in unexpected_outputs {
+            write!(output, "    Not annotated | ").unwrap();
+            print_user_output(output, source, line, unexpected)
         }
 
-        for error in ref_errors.iter() {
-            if !errors.contains(error) {
-                print!("    Not emitted   | ");
-                print_error(&source, line, error);
-            }
+        for missing in missing_outputs {
+            write!(output, "    Not emitted   | ").unwrap();
+            print_user_output(output, source, line, missing)
         }
     }
 
     (ok, compare_ref, frames)
 }
 
-fn parse_metadata(source: &Source) -> (Option<bool>, Vec<(Range<usize>, String)>) {
+fn print_user_output(
+    output: &mut String,
+    source: &Source,
+    line: usize,
+    user_output: &UserOutput,
+) {
+    let (range, message) = match &user_output {
+        UserOutput::Error(r, m) => (r, m),
+        UserOutput::Hint(r, m) => (r, m),
+    };
+
+    let start_line = 1 + line + source.byte_to_line(range.start).unwrap();
+    let start_col = 1 + source.byte_to_column(range.start).unwrap();
+    let end_line = 1 + line + source.byte_to_line(range.end).unwrap();
+    let end_col = 1 + source.byte_to_column(range.end).unwrap();
+    let kind = match user_output {
+        UserOutput::Error(_, _) => "Error",
+        UserOutput::Hint(_, _) => "Hint",
+    };
+    writeln!(output, "{kind}: {start_line}:{start_col}-{end_line}:{end_col}: {message}")
+        .unwrap();
+}
+
+struct TestConfiguration {
+    compare_ref: Option<bool>,
+    validate_hints: Option<bool>,
+}
+
+struct TestPartMetadata {
+    part_configuration: TestConfiguration,
+    invariants: HashSet<UserOutput>,
+}
+
+#[derive(PartialEq, Eq, Debug, Hash)]
+enum UserOutput {
+    Error(Range<usize>, String),
+    Hint(Range<usize>, String),
+}
+
+impl UserOutput {
+    fn start(&self) -> usize {
+        match self {
+            UserOutput::Error(r, _) => r.start,
+            UserOutput::Hint(r, _) => r.start,
+        }
+    }
+
+    fn error(range: Range<usize>, message: String) -> UserOutput {
+        UserOutput::Error(range, message)
+    }
+
+    fn hint(range: Range<usize>, message: String) -> UserOutput {
+        UserOutput::Hint(range, message)
+    }
+}
+
+fn parse_part_metadata(source: &Source) -> TestPartMetadata {
     let mut compare_ref = None;
-    let mut errors = vec![];
+    let mut validate_hints = None;
+    let mut expectations = HashSet::default();
 
     let lines: Vec<_> = source.text().lines().map(str::trim).collect();
     for (i, line) in lines.iter().enumerate() {
-        if line.starts_with("// Ref: false") {
-            compare_ref = Some(false);
-        }
-
-        if line.starts_with("// Ref: true") {
-            compare_ref = Some(true);
-        }
+        compare_ref = get_flag_metadata(line, "Ref").or(compare_ref);
+        validate_hints = get_flag_metadata(line, "Hints").or(validate_hints);
 
         fn num(s: &mut Scanner) -> usize {
             s.eat_while(char::is_numeric).parse().unwrap()
         }
 
-        let comments =
+        let comments_until_code =
             lines[i..].iter().take_while(|line| line.starts_with("//")).count();
 
         let pos = |s: &mut Scanner| -> usize {
             let first = num(s) - 1;
             let (delta, column) =
                 if s.eat_if(':') { (first, num(s) - 1) } else { (0, first) };
-            let line = (i + comments) + delta;
+            let line = (i + comments_until_code) + delta;
             source.line_column_to_byte(line, column).unwrap()
         };
 
-        let Some(rest) = line.strip_prefix("// Error: ") else { continue };
-        let mut s = Scanner::new(rest);
-        let start = pos(&mut s);
-        let end = if s.eat_if('-') { pos(&mut s) } else { start };
-        let range = start..end;
+        let error_factory: fn(Range<usize>, String) -> UserOutput = UserOutput::error;
+        let hint_factory: fn(Range<usize>, String) -> UserOutput = UserOutput::hint;
 
-        errors.push((range, s.after().trim().to_string()));
+        let error_metadata = get_metadata(line, "Error").map(|s| (s, error_factory));
+        let get_hint_metadata = || get_metadata(line, "Hint").map(|s| (s, hint_factory));
+
+        if let Some((expectation, factory)) = error_metadata.or_else(get_hint_metadata) {
+            let mut s = Scanner::new(expectation);
+            let start = pos(&mut s);
+            let end = if s.eat_if('-') { pos(&mut s) } else { start };
+            let range = start..end;
+
+            expectations.insert(factory(range, s.after().trim().to_string()));
+        };
     }
 
-    (compare_ref, errors)
-}
-
-fn print_error(source: &Source, line: usize, (range, message): &(Range<usize>, String)) {
-    let start_line = 1 + line + source.byte_to_line(range.start).unwrap();
-    let start_col = 1 + source.byte_to_column(range.start).unwrap();
-    let end_line = 1 + line + source.byte_to_line(range.end).unwrap();
-    let end_col = 1 + source.byte_to_column(range.end).unwrap();
-    println!("Error: {start_line}:{start_col}-{end_line}:{end_col}: {message}");
+    TestPartMetadata {
+        part_configuration: TestConfiguration { compare_ref, validate_hints },
+        invariants: expectations,
+    }
 }
 
 /// Pseudorandomly edit the source file and test whether a reparse produces the
@@ -556,7 +717,12 @@ fn print_error(source: &Source, line: usize, (range, message): &(Range<usize>, S
 /// The method will first inject 10 strings once every 400 source characters
 /// and then select 5 leaf node boundaries to inject an additional, randomly
 /// chosen string from the injection list.
-fn test_reparse(text: &str, i: usize, rng: &mut LinearShift) -> bool {
+fn test_reparse(
+    output: &mut String,
+    text: &str,
+    i: usize,
+    rng: &mut LinearShift,
+) -> bool {
     let supplements = [
         "[",
         "]",
@@ -587,7 +753,7 @@ fn test_reparse(text: &str, i: usize, rng: &mut LinearShift) -> bool {
 
     let mut ok = true;
 
-    let apply = |replace: std::ops::Range<usize>, with| {
+    let mut apply = |replace: Range<usize>, with| {
         let mut incr_source = Source::detached(text);
         if incr_source.root().len() != text.len() {
             println!(
@@ -606,7 +772,7 @@ fn test_reparse(text: &str, i: usize, rng: &mut LinearShift) -> bool {
         let mut incr_root = incr_source.root().clone();
 
         // Ensures that the span numbering invariants hold.
-        let spans_ok = test_spans(&ref_root) && test_spans(&incr_root);
+        let spans_ok = test_spans(output, &ref_root) && test_spans(output, &incr_root);
 
         // Remove all spans so that the comparison works out.
         let tree_ok = {
@@ -616,13 +782,19 @@ fn test_reparse(text: &str, i: usize, rng: &mut LinearShift) -> bool {
         };
 
         if !tree_ok {
-            println!(
+            writeln!(
+                output,
                 "    Subtest {i} reparse differs from clean parse when inserting '{with}' at {}-{} ❌\n",
                 replace.start, replace.end,
-            );
-            println!("    Expected reference tree:\n{ref_root:#?}\n");
-            println!("    Found incremental tree:\n{incr_root:#?}");
-            println!("    Full source ({}):\n\"{edited_src:?}\"", edited_src.len());
+            ).unwrap();
+            writeln!(output, "    Expected reference tree:\n{ref_root:#?}\n").unwrap();
+            writeln!(output, "    Found incremental tree:\n{incr_root:#?}").unwrap();
+            writeln!(
+                output,
+                "    Full source ({}):\n\"{edited_src:?}\"",
+                edited_src.len()
+            )
+            .unwrap();
         }
 
         spans_ok && tree_ok
@@ -666,22 +838,27 @@ fn leafs(node: &SyntaxNode) -> Vec<SyntaxNode> {
 
 /// Ensure that all spans are properly ordered (and therefore unique).
 #[track_caller]
-fn test_spans(root: &SyntaxNode) -> bool {
-    test_spans_impl(root, 0..u64::MAX)
+fn test_spans(output: &mut String, root: &SyntaxNode) -> bool {
+    test_spans_impl(output, root, 0..u64::MAX)
 }
 
 #[track_caller]
-fn test_spans_impl(node: &SyntaxNode, within: Range<u64>) -> bool {
+fn test_spans_impl(output: &mut String, node: &SyntaxNode, within: Range<u64>) -> bool {
     if !within.contains(&node.span().number()) {
-        eprintln!("    Node: {node:#?}");
-        eprintln!("    Wrong span order: {} not in {within:?} ❌", node.span().number(),);
+        writeln!(output, "    Node: {node:#?}").unwrap();
+        writeln!(
+            output,
+            "    Wrong span order: {} not in {within:?} ❌",
+            node.span().number()
+        )
+        .unwrap();
     }
 
     let start = node.span().number() + 1;
     let mut children = node.children().peekable();
     while let Some(child) = children.next() {
         let end = children.peek().map_or(within.end, |next| next.span().number());
-        if !test_spans_impl(child, start..end) {
+        if !test_spans_impl(output, child, start..end) {
             return false;
         }
     }

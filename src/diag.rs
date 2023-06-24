@@ -8,44 +8,62 @@ use std::str::Utf8Error;
 use std::string::FromUtf8Error;
 
 use comemo::Tracked;
-use ecow::EcoString;
 
 use crate::syntax::{ErrorPos, Span, Spanned};
 use crate::World;
 
-/// Early-return with a [`SourceError`].
+/// Early-return with a [`StrResult`] or [`SourceResult`].
+///
+/// If called with just a string and format args, returns with a
+/// `StrResult`. If called with a span, a string and format args, returns
+/// a `SourceResult`.
+///
+/// ```
+/// bail!("bailing with a {}", "string result");
+/// bail!(span, "bailing with a {}", "source result");
+/// ```
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __bail {
+    ($fmt:literal $(, $arg:expr)* $(,)?) => {
+        return Err($crate::diag::eco_format!($fmt, $($arg),*))
+    };
+
     ($error:expr) => {
         return Err(Box::new(vec![$error]))
     };
 
-    ($($tts:tt)*) => {
-        $crate::diag::bail!($crate::diag::error!($($tts)*))
+    ($span:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
+        return Err(Box::new(vec![$crate::diag::SourceError::new(
+            $span,
+            $crate::diag::eco_format!($fmt, $($arg),*),
+        )]))
     };
 }
 
 #[doc(inline)]
 pub use crate::__bail as bail;
 
-/// Construct a [`SourceError`].
+/// Construct an [`EcoString`] or [`SourceError`].
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __error {
-    ($span:expr, $message:expr $(,)?) => {
-        $crate::diag::SourceError::new($span, $message)
+    ($fmt:literal $(, $arg:expr)* $(,)?) => {
+        $crate::diag::eco_format!($fmt, $($arg),*)
     };
 
-    ($span:expr, $fmt:expr, $($arg:expr),+ $(,)?) => {
-        $crate::diag::error!($span, $crate::diag::eco_format!($fmt, $($arg),+))
+    ($span:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
+        $crate::diag::SourceError::new(
+            $span,
+            $crate::diag::eco_format!($fmt, $($arg),*),
+        )
     };
 }
 
 #[doc(inline)]
 pub use crate::__error as error;
 #[doc(hidden)]
-pub use ecow::eco_format;
+pub use ecow::{eco_format, EcoString};
 
 /// A result that can carry multiple source errors.
 pub type SourceResult<T> = Result<T, Box<Vec<SourceError>>>;
@@ -64,23 +82,32 @@ pub struct SourceError {
     pub message: EcoString,
     /// The trace of function calls leading to the error.
     pub trace: Vec<Spanned<Tracepoint>>,
+    /// Additonal hints to the user, indicating how this error could be avoided
+    /// or worked around.
+    pub hints: Vec<EcoString>,
 }
 
 impl SourceError {
     /// Create a new, bare error.
-    #[track_caller]
     pub fn new(span: Span, message: impl Into<EcoString>) -> Self {
         Self {
             span,
             pos: ErrorPos::Full,
             trace: vec![],
             message: message.into(),
+            hints: vec![],
         }
     }
 
     /// Adjust the position in the node where the error should be annotated.
     pub fn with_pos(mut self, pos: ErrorPos) -> Self {
         self.pos = pos;
+        self
+    }
+
+    /// Adds user-facing hints to the error.
+    pub fn with_hints(mut self, hints: impl IntoIterator<Item = EcoString>) -> Self {
+        self.hints.extend(hints);
         self
     }
 
@@ -130,13 +157,13 @@ impl Display for Tracepoint {
 /// Enrich a [`SourceResult`] with a tracepoint.
 pub trait Trace<T> {
     /// Add the tracepoint to all errors that lie outside the `span`.
-    fn trace<F>(self, world: Tracked<dyn World>, make_point: F, span: Span) -> Self
+    fn trace<F>(self, world: Tracked<dyn World + '_>, make_point: F, span: Span) -> Self
     where
         F: Fn() -> Tracepoint;
 }
 
 impl<T> Trace<T> for SourceResult<T> {
-    fn trace<F>(self, world: Tracked<dyn World>, make_point: F, span: Span) -> Self
+    fn trace<F>(self, world: Tracked<dyn World + '_>, make_point: F, span: Span) -> Self
     where
         F: Fn() -> Tracepoint,
     {
@@ -173,7 +200,49 @@ where
     S: Into<EcoString>,
 {
     fn at(self, span: Span) -> SourceResult<T> {
-        self.map_err(|message| Box::new(vec![error!(span, message)]))
+        self.map_err(|message| Box::new(vec![SourceError::new(span, message)]))
+    }
+}
+
+/// A result type with a string error message and hints.
+pub type HintedStrResult<T> = Result<T, HintedString>;
+
+/// A string message with hints.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct HintedString {
+    /// A diagnostic message describing the problem.
+    pub message: EcoString,
+    /// Additonal hints to the user, indicating how this error could be avoided
+    /// or worked around.
+    pub hints: Vec<EcoString>,
+}
+
+impl<T> At<T> for Result<T, HintedString> {
+    fn at(self, span: Span) -> SourceResult<T> {
+        self.map_err(|diags| {
+            Box::new(vec![SourceError::new(span, diags.message).with_hints(diags.hints)])
+        })
+    }
+}
+
+/// Enrich a [`StrResult`] or [`HintedStrResult`] with a hint.
+pub trait Hint<T> {
+    /// Add the hint.
+    fn hint(self, hint: impl Into<EcoString>) -> HintedStrResult<T>;
+}
+
+impl<T> Hint<T> for StrResult<T> {
+    fn hint(self, hint: impl Into<EcoString>) -> HintedStrResult<T> {
+        self.map_err(|message| HintedString { message, hints: vec![hint.into()] })
+    }
+}
+
+impl<T> Hint<T> for HintedStrResult<T> {
+    fn hint(self, hint: impl Into<EcoString>) -> HintedStrResult<T> {
+        self.map_err(|mut error| {
+            error.hints.push(hint.into());
+            error
+        })
     }
 }
 
@@ -249,31 +318,30 @@ impl From<FileError> for EcoString {
 }
 
 /// Format a user-facing error message for an XML-like file format.
-pub fn format_xml_like_error(format: &str, error: roxmltree::Error) -> String {
+pub fn format_xml_like_error(format: &str, error: roxmltree::Error) -> EcoString {
     match error {
         roxmltree::Error::UnexpectedCloseTag { expected, actual, pos } => {
-            format!(
+            eco_format!(
                 "failed to parse {format}: found closing tag '{actual}' \
                  instead of '{expected}' in line {}",
                 pos.row
             )
         }
         roxmltree::Error::UnknownEntityReference(entity, pos) => {
-            format!(
+            eco_format!(
                 "failed to parse {format}: unknown entity '{entity}' in line {}",
                 pos.row
             )
         }
         roxmltree::Error::DuplicatedAttribute(attr, pos) => {
-            format!(
+            eco_format!(
                 "failed to parse {format}: duplicate attribute '{attr}' in line {}",
                 pos.row
             )
         }
         roxmltree::Error::NoRootNode => {
-            format!("failed to parse {format}: missing root node")
+            eco_format!("failed to parse {format}: missing root node")
         }
-        roxmltree::Error::SizeLimit => "file is too large".into(),
-        _ => format!("failed to parse {format}"),
+        _ => eco_format!("failed to parse {format}"),
     }
 }

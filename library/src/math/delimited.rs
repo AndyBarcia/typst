@@ -8,7 +8,7 @@ pub(super) const DELIM_SHORT_FALL: Em = Em::new(0.1);
 /// While matched delimiters scale by default, this can be used to scale
 /// unmatched delimiters and to control the delimiter scaling more precisely.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ lr(]a, b/2]) $
 /// $ lr(]sum_(x=1)^n] x, size: #50%) $
@@ -19,8 +19,6 @@ pub(super) const DELIM_SHORT_FALL: Em = Em::new(0.1);
 #[element(LayoutMath)]
 pub struct LrElem {
     /// The size of the brackets, relative to the height of the wrapped content.
-    ///
-    /// Defaults to `{100%}`.
     pub size: Smart<Rel<Length>>,
 
     /// The delimited content, including the delimiters.
@@ -39,6 +37,7 @@ pub struct LrElem {
 }
 
 impl LayoutMath for LrElem {
+    #[tracing::instrument(skip(ctx))]
     fn layout_math(&self, ctx: &mut MathContext) -> SourceResult<()> {
         let mut body = self.body();
         if let Some(elem) = body.to::<LrElem>() {
@@ -105,45 +104,60 @@ fn scale(
     }
 }
 
-/// Floor an expression.
+/// Floors an expression.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ floor(x/2) $
 /// ```
 ///
 /// Display: Floor
 /// Category: math
-/// Returns: content
 #[func]
 pub fn floor(
     /// The expression to floor.
     body: Content,
-) -> Value {
+) -> Content {
     delimited(body, '⌊', '⌋')
 }
 
-/// Ceil an expression.
+/// Ceils an expression.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ ceil(x/2) $
 /// ```
 ///
 /// Display: Ceil
 /// Category: math
-/// Returns: content
 #[func]
 pub fn ceil(
     /// The expression to ceil.
     body: Content,
-) -> Value {
+) -> Content {
     delimited(body, '⌈', '⌉')
 }
 
-/// Take the absolute value of an expression.
+/// Rounds an expression.
 ///
-/// ## Example
+/// ## Example { #example }
+/// ```example
+/// $ round(x/2) $
+/// ```
+///
+/// Display: Round
+/// Category: math
+#[func]
+pub fn round(
+    /// The expression to round.
+    body: Content,
+) -> Content {
+    delimited(body, '⌊', '⌉')
+}
+
+/// Takes the absolute value of an expression.
+///
+/// ## Example { #example }
 /// ```example
 /// $ abs(x/2) $
 /// ```
@@ -151,39 +165,36 @@ pub fn ceil(
 ///
 /// Display: Abs
 /// Category: math
-/// Returns: content
 #[func]
 pub fn abs(
     /// The expression to take the absolute value of.
     body: Content,
-) -> Value {
+) -> Content {
     delimited(body, '|', '|')
 }
 
-/// Take the norm of an expression.
+/// Takes the norm of an expression.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ norm(x/2) $
 /// ```
 ///
 /// Display: Norm
 /// Category: math
-/// Returns: content
 #[func]
 pub fn norm(
     /// The expression to take the norm of.
     body: Content,
-) -> Value {
+) -> Content {
     delimited(body, '‖', '‖')
 }
 
-fn delimited(body: Content, left: char, right: char) -> Value {
+fn delimited(body: Content, left: char, right: char) -> Content {
     LrElem::new(Content::sequence([
         TextElem::packed(left),
         body,
         TextElem::packed(right),
     ]))
     .pack()
-    .into()
 }

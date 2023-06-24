@@ -6,6 +6,7 @@ use super::{
     FontFamily, FontList, Hyphenate, LinebreakElem, SmartQuoteElem, TextElem, TextSize,
 };
 use crate::layout::BlockElem;
+use crate::meta::{Figurable, LocalName};
 use crate::prelude::*;
 
 /// Raw text with optional syntax highlighting.
@@ -13,15 +14,7 @@ use crate::prelude::*;
 /// Displays the text verbatim and in a monospace font. This is typically used
 /// to embed computer code into your document.
 ///
-/// ## Syntax
-/// This function also has dedicated syntax. You can enclose text in 1 or 3+
-/// backticks (`` ` ``) to make it raw. Two backticks produce empty raw text.
-/// When you use three or more backticks, you can additionally specify a
-/// language tag for syntax highlighting directly after the opening backticks.
-/// Within raw blocks, everything is rendered as is, in particular, there are no
-/// escape sequences.
-///
-/// ## Example
+/// ## Example { #example }
 /// ````example
 /// Adding `rbx` to `rcx` gives
 /// the desired result.
@@ -33,9 +26,17 @@ use crate::prelude::*;
 /// ```
 /// ````
 ///
+/// ## Syntax { #syntax }
+/// This function also has dedicated syntax. You can enclose text in 1 or 3+
+/// backticks (`` ` ``) to make it raw. Two backticks produce empty raw text.
+/// When you use three or more backticks, you can additionally specify a
+/// language tag for syntax highlighting directly after the opening backticks.
+/// Within raw blocks, everything is rendered as is, in particular, there are no
+/// escape sequences.
+///
 /// Display: Raw Text / Code
 /// Category: text
-#[element(Synthesize, Show, Finalize)]
+#[element(Synthesize, Show, Finalize, LocalName, Figurable, PlainText)]
 pub struct RawElem {
     /// The raw text.
     ///
@@ -61,6 +62,9 @@ pub struct RawElem {
     pub text: EcoString,
 
     /// Whether the raw text is displayed as a separate block.
+    ///
+    /// In markup mode, using one-backtick notation makes this `{false}`,
+    /// whereas using three-backtick notation makes it `{true}`.
     ///
     /// ````example
     /// // Display inline code in a small box
@@ -101,6 +105,27 @@ pub struct RawElem {
     /// ```
     /// ````
     pub lang: Option<EcoString>,
+
+    /// The horizontal alignment that each line in a raw block should have.
+    /// This option is ignored if this is not a raw block (if specified
+    /// `block: false` or single backticks were used in markup mode).
+    ///
+    /// By default, this is set to `{start}`, meaning that raw text is
+    /// aligned towards the start of the text direction inside the block
+    /// by default, regardless of the current context's alignment (allowing
+    /// you to center the raw block itself without centering the text inside
+    /// it, for example).
+    ///
+    /// ````example
+    /// #set raw(align: center)
+    ///
+    /// ```typc
+    /// let f(x) = x
+    /// code = "centered"
+    /// ```
+    /// ````
+    #[default(HorizontalAlign(GenAlign::Start))]
+    pub align: HorizontalAlign,
 }
 
 impl RawElem {
@@ -121,12 +146,14 @@ impl RawElem {
 }
 
 impl Synthesize for RawElem {
-    fn synthesize(&mut self, styles: StyleChain) {
+    fn synthesize(&mut self, _vt: &mut Vt, styles: StyleChain) -> SourceResult<()> {
         self.push_lang(self.lang(styles));
+        Ok(())
     }
 }
 
 impl Show for RawElem {
+    #[tracing::instrument(name = "RawElem::show", skip_all)]
     fn show(&self, _: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
         let text = self.text();
         let lang = self.lang(styles).as_ref().map(|s| s.to_lowercase());
@@ -134,8 +161,7 @@ impl Show for RawElem {
             .settings
             .foreground
             .map(to_typst)
-            .map_or(Color::BLACK, Color::from)
-            .into();
+            .map_or(Color::BLACK, Color::from);
 
         let mut realized = if matches!(lang.as_deref(), Some("typ" | "typst" | "typc")) {
             let root = match lang.as_deref() {
@@ -150,7 +176,7 @@ impl Show for RawElem {
                 vec![],
                 &highlighter,
                 &mut |node, style| {
-                    seq.push(styled(&text[node.range()], foreground, style));
+                    seq.push(styled(&text[node.range()], foreground.into(), style));
                 },
             );
 
@@ -168,7 +194,7 @@ impl Show for RawElem {
                 for (style, piece) in
                     highlighter.highlight_line(line, &SYNTAXES).into_iter().flatten()
                 {
-                    seq.push(styled(piece, foreground, style));
+                    seq.push(styled(piece, foreground.into(), style));
                 }
             }
 
@@ -178,6 +204,8 @@ impl Show for RawElem {
         };
 
         if self.block(styles) {
+            // Align the text before inserting it into the block.
+            realized = realized.aligned(Axes::with_x(Some(self.align(styles).into())));
             realized = BlockElem::new().with_body(Some(realized)).pack();
         }
 
@@ -195,6 +223,41 @@ impl Finalize for RawElem {
             .set(TextElem::set_font(FontList(vec![FontFamily::new("DejaVu Sans Mono")])));
         styles.set(SmartQuoteElem::set_enabled(false));
         realized.styled_with_map(styles)
+    }
+}
+
+impl LocalName for RawElem {
+    fn local_name(&self, lang: Lang, _: Option<Region>) -> &'static str {
+        match lang {
+            Lang::ALBANIAN => "List",
+            Lang::ARABIC => "قائمة",
+            Lang::BOKMÅL => "Utskrift",
+            Lang::CHINESE => "代码",
+            Lang::CZECH => "Seznam",
+            Lang::DANISH => "Liste",
+            Lang::DUTCH => "Listing",
+            Lang::FILIPINO => "Listahan",
+            Lang::FRENCH => "Liste",
+            Lang::GERMAN => "Listing",
+            Lang::ITALIAN => "Codice",
+            Lang::NYNORSK => "Utskrift",
+            Lang::POLISH => "Program",
+            Lang::RUSSIAN => "Листинг",
+            Lang::SLOVENIAN => "Program",
+            Lang::SWEDISH => "Listing",
+            Lang::TURKISH => "Liste",
+            Lang::UKRAINIAN => "Лістинг",
+            Lang::VIETNAMESE => "Chương trình", // TODO: This may be wrong.
+            Lang::ENGLISH | _ => "Listing",
+        }
+    }
+}
+
+impl Figurable for RawElem {}
+
+impl PlainText for RawElem {
+    fn plain_text(&self, text: &mut EcoString) {
+        text.push_str(&self.text());
     }
 }
 
@@ -256,8 +319,32 @@ fn to_syn(RgbaColor { r, g, b, a }: RgbaColor) -> synt::Color {
 }
 
 /// The syntect syntax definitions.
+///
+/// Code for syntax set generation is below. The `syntaxes` directory is from
+/// <https://github.com/sharkdp/bat/tree/master/assets/syntaxes>
+///
+/// ```ignore
+/// fn main() {
+///     let mut builder = syntect::parsing::SyntaxSet::load_defaults_nonewlines().into_builder();
+///     builder.add_from_folder("syntaxes/02_Extra", false).unwrap();
+///     syntect::dumps::dump_to_file(&builder.build(), "syntect.bin").unwrap();
+/// }
+/// ```
+///
+/// The following syntaxes are disabled due to compatibility issues:
+/// ```text
+/// syntaxes/02_Extra/Assembly (ARM).sublime-syntax
+/// syntaxes/02_Extra/Elixir/Regular Expressions (Elixir).sublime-syntax
+/// syntaxes/02_Extra/JavaScript (Babel).sublime-syntax
+/// syntaxes/02_Extra/LiveScript.sublime-syntax
+/// syntaxes/02_Extra/PowerShell.sublime-syntax
+/// syntaxes/02_Extra/SCSS_Sass/Syntaxes/Sass.sublime-syntax
+/// syntaxes/02_Extra/SLS/SLS.sublime-syntax
+/// syntaxes/02_Extra/VimHelp.sublime-syntax
+/// syntaxes/02_Extra/cmd-help/syntaxes/cmd-help.sublime-syntax
+/// ```
 static SYNTAXES: Lazy<syntect::parsing::SyntaxSet> =
-    Lazy::new(|| syntect::parsing::SyntaxSet::load_defaults_nonewlines());
+    Lazy::new(|| syntect::dumps::from_binary(include_bytes!("../../assets/syntect.bin")));
 
 /// The default theme used for syntax highlighting.
 pub static THEME: Lazy<synt::Theme> = Lazy::new(|| synt::Theme {

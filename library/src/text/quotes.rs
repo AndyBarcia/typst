@@ -7,7 +7,7 @@ use crate::prelude::*;
 /// Automatically turns into an appropriate opening or closing quote based on
 /// the active [text language]($func/text.lang).
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// "This is in quotes."
 ///
@@ -18,7 +18,7 @@ use crate::prelude::*;
 /// "C'est entre guillemets."
 /// ```
 ///
-/// ## Syntax
+/// ## Syntax { #syntax }
 /// This function also has dedicated syntax: The normal quote characters
 /// (`'` and `"`). Typst automatically makes your quotes smart.
 ///
@@ -130,7 +130,7 @@ impl<'s> Quotes<'s> {
     ///
     /// Currently, the supported languages are: English, Czech, Danish, German,
     /// Swiss / Liechtensteinian German, Estonian, Icelandic, Lithuanian,
-    /// Latvian, Slovak, Slovenian, Bosnian, Finnish, Swedish, French,
+    /// Latvian, Slovak, Slovenian, Spanish, Bosnian, Finnish, Swedish, French,
     /// Hungarian, Polish, Romanian, Japanese, Traditional Chinese, Russian, and
     /// Norwegian.
     ///
@@ -144,8 +144,10 @@ impl<'s> Quotes<'s> {
             }
             "fr" => ("‹\u{00A0}", "\u{00A0}›", "«\u{00A0}", "\u{00A0}»"),
             "bs" | "fi" | "sv" => ("’", "’", "”", "”"),
+            "es" if matches!(region, Some("ES") | None) => ("“", "”", "«", "»"),
             "hu" | "pl" | "ro" => ("’", "’", "„", "”"),
-            "ru" | "no" | "nb" | "nn" => ("’", "’", "«", "»"),
+            "ru" | "no" | "nb" | "nn" | "ua" => ("’", "’", "«", "»"),
+            _ if lang.dir() == Dir::RTL => ("’", "‘", "”", "“"),
             _ => return Self::default(),
         };
 

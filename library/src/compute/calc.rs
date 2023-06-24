@@ -1,7 +1,8 @@
 //! Calculations and processing of numeric values.
 
+use std::cmp;
 use std::cmp::Ordering;
-use std::ops::Rem;
+use std::ops::{Div, Rem};
 
 use typst::eval::{Module, Scope};
 
@@ -10,38 +11,49 @@ use crate::prelude::*;
 /// A module with computational functions.
 pub fn module() -> Module {
     let mut scope = Scope::new();
-    scope.define("abs", abs);
-    scope.define("pow", pow);
-    scope.define("sqrt", sqrt);
-    scope.define("sin", sin);
-    scope.define("cos", cos);
-    scope.define("tan", tan);
-    scope.define("asin", asin);
-    scope.define("acos", acos);
-    scope.define("atan", atan);
-    scope.define("sinh", sinh);
-    scope.define("cosh", cosh);
-    scope.define("tanh", tanh);
-    scope.define("log", log);
-    scope.define("floor", floor);
-    scope.define("ceil", ceil);
-    scope.define("round", round);
-    scope.define("clamp", clamp);
-    scope.define("min", min);
-    scope.define("max", max);
-    scope.define("even", even);
-    scope.define("odd", odd);
-    scope.define("mod", mod_);
-    scope.define("inf", Value::Float(f64::INFINITY));
-    scope.define("nan", Value::Float(f64::NAN));
-    scope.define("pi", Value::Float(std::f64::consts::PI));
-    scope.define("e", Value::Float(std::f64::consts::E));
+    scope.define("abs", abs_func());
+    scope.define("pow", pow_func());
+    scope.define("exp", exp_func());
+    scope.define("sqrt", sqrt_func());
+    scope.define("sin", sin_func());
+    scope.define("cos", cos_func());
+    scope.define("tan", tan_func());
+    scope.define("asin", asin_func());
+    scope.define("acos", acos_func());
+    scope.define("atan", atan_func());
+    scope.define("atan2", atan2_func());
+    scope.define("sinh", sinh_func());
+    scope.define("cosh", cosh_func());
+    scope.define("tanh", tanh_func());
+    scope.define("log", log_func());
+    scope.define("ln", ln_func());
+    scope.define("fact", fact_func());
+    scope.define("perm", perm_func());
+    scope.define("binom", binom_func());
+    scope.define("gcd", gcd_func());
+    scope.define("lcm", lcm_func());
+    scope.define("floor", floor_func());
+    scope.define("ceil", ceil_func());
+    scope.define("trunc", trunc_func());
+    scope.define("fract", fract_func());
+    scope.define("round", round_func());
+    scope.define("clamp", clamp_func());
+    scope.define("min", min_func());
+    scope.define("max", max_func());
+    scope.define("even", even_func());
+    scope.define("odd", odd_func());
+    scope.define("rem", rem_func());
+    scope.define("quo", quo_func());
+    scope.define("inf", f64::INFINITY);
+    scope.define("nan", f64::NAN);
+    scope.define("pi", std::f64::consts::PI);
+    scope.define("e", std::f64::consts::E);
     Module::new("calc").with_scope(scope)
 }
 
-/// Calculate the absolute value of a numeric value.
+/// Calculates the absolute value of a numeric value.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.abs(-5) \
 /// #calc.abs(5pt - 2cm) \
@@ -50,7 +62,6 @@ pub fn module() -> Module {
 ///
 /// Display: Absolute
 /// Category: calculate
-/// Returns: any
 #[func]
 pub fn abs(
     /// The value whose absolute value to calculate.
@@ -60,52 +71,111 @@ pub fn abs(
 }
 
 /// A value of which the absolute value can be taken.
-struct ToAbs(Value);
+pub struct ToAbs(Value);
 
-cast_from_value! {
+cast! {
     ToAbs,
-    v: i64 => Self(Value::Int(v.abs())),
-    v: f64 => Self(Value::Float(v.abs())),
+    v: i64 => Self(v.abs().into_value()),
+    v: f64 => Self(v.abs().into_value()),
     v: Length => Self(Value::Length(v.try_abs()
-        .ok_or_else(|| "cannot take absolute value of this length")?)),
+        .ok_or("cannot take absolute value of this length")?)),
     v: Angle => Self(Value::Angle(v.abs())),
     v: Ratio => Self(Value::Ratio(v.abs())),
     v: Fr => Self(Value::Fraction(v.abs())),
 }
 
-/// Raise a value to some exponent.
+/// Raises a value to some exponent.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.pow(2, 3)
 /// ```
 ///
 /// Display: Power
 /// Category: calculate
-/// Returns: integer or float
 #[func]
 pub fn pow(
     /// The base of the power.
     base: Num,
-    /// The exponent of the power. Must be non-negative.
+    /// The exponent of the power.
     exponent: Spanned<Num>,
-) -> Value {
-    let exponent = match exponent.v {
-        Num::Int(i) if i > u32::MAX as i64 => {
-            bail!(exponent.span, "exponent too large");
+    /// The callsite span.
+    span: Span,
+) -> SourceResult<Num> {
+    match exponent.v {
+        _ if exponent.v.float() == 0.0 && base.float() == 0.0 => {
+            bail!(span, "zero to the power of zero is undefined")
         }
-        Num::Int(0..) => exponent.v,
-        Num::Float(f) if f >= 0.0 => exponent.v,
-        _ => {
-            bail!(exponent.span, "exponent must be non-negative");
+        Num::Int(i) if i32::try_from(i).is_err() => {
+            bail!(exponent.span, "exponent is too large")
         }
+        Num::Float(f) if !f.is_normal() && f != 0.0 => {
+            bail!(exponent.span, "exponent may not be infinite, subnormal, or NaN")
+        }
+        _ => {}
     };
-    base.apply2(exponent, |a, b| a.pow(b as u32), f64::powf)
+
+    let result = match (base, exponent.v) {
+        (Num::Int(a), Num::Int(b)) if b >= 0 => a
+            .checked_pow(b as u32)
+            .map(Num::Int)
+            .ok_or("the result is too large")
+            .at(span)?,
+        (a, b) => Num::Float(if a.float() == std::f64::consts::E {
+            b.float().exp()
+        } else if a.float() == 2.0 {
+            b.float().exp2()
+        } else if let Num::Int(b) = b {
+            a.float().powi(b as i32)
+        } else {
+            a.float().powf(b.float())
+        }),
+    };
+
+    if result.float().is_nan() {
+        bail!(span, "the result is not a real number")
+    }
+
+    Ok(result)
 }
 
-/// Calculate the square root of a number.
+/// Raises a value to some exponent of e.
 ///
-/// ## Example
+/// ## Example { #example }
+/// ```example
+/// #calc.exp(1)
+/// ```
+///
+/// Display: Exponential
+/// Category: calculate
+#[func]
+pub fn exp(
+    /// The exponent of the power.
+    exponent: Spanned<Num>,
+    /// The callsite span.
+    span: Span,
+) -> SourceResult<f64> {
+    match exponent.v {
+        Num::Int(i) if i32::try_from(i).is_err() => {
+            bail!(exponent.span, "exponent is too large")
+        }
+        Num::Float(f) if !f.is_normal() && f != 0.0 => {
+            bail!(exponent.span, "exponent may not be infinite, subnormal, or NaN")
+        }
+        _ => {}
+    };
+
+    let result = exponent.v.float().exp();
+    if result.is_nan() {
+        bail!(span, "the result is not a real number")
+    }
+
+    Ok(result)
+}
+
+/// Extracts the square root of a number.
+///
+/// ## Example { #example }
 /// ```example
 /// #calc.sqrt(16) \
 /// #calc.sqrt(2.5)
@@ -113,24 +183,23 @@ pub fn pow(
 ///
 /// Display: Square Root
 /// Category: calculate
-/// Returns: float
 #[func]
 pub fn sqrt(
     /// The number whose square root to calculate. Must be non-negative.
     value: Spanned<Num>,
-) -> Value {
+) -> SourceResult<f64> {
     if value.v.float() < 0.0 {
         bail!(value.span, "cannot take square root of negative number");
     }
-    Value::Float(value.v.float().sqrt())
+    Ok(value.v.float().sqrt())
 }
 
-/// Calculate the sine of an angle.
+/// Calculates the sine of an angle.
 ///
 /// When called with an integer or a float, they will be interpreted as
 /// radians.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #assert(calc.sin(90deg) == calc.sin(-270deg))
 /// #calc.sin(1.5) \
@@ -139,25 +208,24 @@ pub fn sqrt(
 ///
 /// Display: Sine
 /// Category: calculate
-/// Returns: float
 #[func]
 pub fn sin(
     /// The angle whose sine to calculate.
     angle: AngleLike,
-) -> Value {
-    Value::Float(match angle {
+) -> f64 {
+    match angle {
         AngleLike::Angle(a) => a.sin(),
         AngleLike::Int(n) => (n as f64).sin(),
         AngleLike::Float(n) => n.sin(),
-    })
+    }
 }
 
-/// Calculate the cosine of an angle.
+/// Calculates the cosine of an angle.
 ///
 /// When called with an integer or a float, they will be interpreted as
 /// radians.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.cos(90deg) \
 /// #calc.cos(1.5) \
@@ -166,25 +234,24 @@ pub fn sin(
 ///
 /// Display: Cosine
 /// Category: calculate
-/// Returns: float
 #[func]
 pub fn cos(
     /// The angle whose cosine to calculate.
     angle: AngleLike,
-) -> Value {
-    Value::Float(match angle {
+) -> f64 {
+    match angle {
         AngleLike::Angle(a) => a.cos(),
         AngleLike::Int(n) => (n as f64).cos(),
         AngleLike::Float(n) => n.cos(),
-    })
+    }
 }
 
-/// Calculate the tangent of an angle.
+/// Calculates the tangent of an angle.
 ///
 /// When called with an integer or a float, they will be interpreted as
 /// radians.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.tan(1.5) \
 /// #calc.tan(90deg)
@@ -192,22 +259,21 @@ pub fn cos(
 ///
 /// Display: Tangent
 /// Category: calculate
-/// Returns: float
 #[func]
 pub fn tan(
     /// The angle whose tangent to calculate.
     angle: AngleLike,
-) -> Value {
-    Value::Float(match angle {
+) -> f64 {
+    match angle {
         AngleLike::Angle(a) => a.tan(),
         AngleLike::Int(n) => (n as f64).tan(),
         AngleLike::Float(n) => n.tan(),
-    })
+    }
 }
 
-/// Calculate the arcsine of a number.
+/// Calculates the arcsine of a number.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.asin(0) \
 /// #calc.asin(1)
@@ -215,22 +281,21 @@ pub fn tan(
 ///
 /// Display: Arcsine
 /// Category: calculate
-/// Returns: angle
 #[func]
 pub fn asin(
     /// The number whose arcsine to calculate. Must be between -1 and 1.
     value: Spanned<Num>,
-) -> Value {
+) -> SourceResult<Angle> {
     let val = value.v.float();
     if val < -1.0 || val > 1.0 {
-        bail!(value.span, "arcsin must be between -1 and 1");
+        bail!(value.span, "value must be between -1 and 1");
     }
-    Value::Angle(Angle::rad(val.asin()))
+    Ok(Angle::rad(val.asin()))
 }
 
-/// Calculate the arccosine of a number.
+/// Calculates the arccosine of a number.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.acos(0) \
 /// #calc.acos(1)
@@ -238,22 +303,21 @@ pub fn asin(
 ///
 /// Display: Arccosine
 /// Category: calculate
-/// Returns: angle
 #[func]
 pub fn acos(
     /// The number whose arcsine to calculate. Must be between -1 and 1.
     value: Spanned<Num>,
-) -> Value {
+) -> SourceResult<Angle> {
     let val = value.v.float();
     if val < -1.0 || val > 1.0 {
-        bail!(value.span, "arccos must be between -1 and 1");
+        bail!(value.span, "value must be between -1 and 1");
     }
-    Value::Angle(Angle::rad(val.acos()))
+    Ok(Angle::rad(val.acos()))
 }
 
-/// Calculate the arctangent of a number.
+/// Calculates the arctangent of a number.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.atan(0) \
 /// #calc.atan(1)
@@ -261,20 +325,41 @@ pub fn acos(
 ///
 /// Display: Arctangent
 /// Category: calculate
-/// Returns: angle
 #[func]
 pub fn atan(
     /// The number whose arctangent to calculate.
     value: Num,
-) -> Value {
-    Value::Angle(Angle::rad(value.float().atan()))
+) -> Angle {
+    Angle::rad(value.float().atan())
 }
 
-/// Calculate the hyperbolic sine of an angle.
+/// Calculates the four-quadrant arctangent of a coordinate.
+///
+/// The arguments are `(x, y)`, not `(y, x)`.
+///
+/// ## Example { #example }
+/// ```example
+/// #calc.atan2(1, 1) \
+/// #calc.atan2(-2, -3)
+/// ```
+///
+/// Display: Four-quadrant Arctangent
+/// Category: calculate
+#[func]
+pub fn atan2(
+    /// The X coordinate.
+    x: Num,
+    /// The Y coordinate.
+    y: Num,
+) -> Angle {
+    Angle::rad(f64::atan2(y.float(), x.float()))
+}
+
+/// Calculates the hyperbolic sine of an angle.
 ///
 /// When called with an integer or a float, they will be interpreted as radians.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.sinh(0) \
 /// #calc.sinh(45deg)
@@ -282,24 +367,23 @@ pub fn atan(
 ///
 /// Display: Hyperbolic sine
 /// Category: calculate
-/// Returns: float
 #[func]
 pub fn sinh(
     /// The angle whose hyperbolic sine to calculate.
     angle: AngleLike,
-) -> Value {
-    Value::Float(match angle {
+) -> f64 {
+    match angle {
         AngleLike::Angle(a) => a.to_rad().sinh(),
         AngleLike::Int(n) => (n as f64).sinh(),
         AngleLike::Float(n) => n.sinh(),
-    })
+    }
 }
 
-/// Calculate the hyperbolic cosine of an angle.
+/// Calculates the hyperbolic cosine of an angle.
 ///
 /// When called with an integer or a float, they will be interpreted as radians.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.cosh(0) \
 /// #calc.cosh(45deg)
@@ -307,24 +391,23 @@ pub fn sinh(
 ///
 /// Display: Hyperbolic cosine
 /// Category: calculate
-/// Returns: float
 #[func]
 pub fn cosh(
     /// The angle whose hyperbolic cosine to calculate.
     angle: AngleLike,
-) -> Value {
-    Value::Float(match angle {
+) -> f64 {
+    match angle {
         AngleLike::Angle(a) => a.to_rad().cosh(),
         AngleLike::Int(n) => (n as f64).cosh(),
         AngleLike::Float(n) => n.cosh(),
-    })
+    }
 }
 
-/// Calculate the hyperbolic tangent of an angle.
+/// Calculates the hyperbolic tangent of an angle.
 ///
 /// When called with an integer or a float, they will be interpreted as radians.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.tanh(0) \
 /// #calc.tanh(45deg)
@@ -332,54 +415,251 @@ pub fn cosh(
 ///
 /// Display: Hyperbolic tangent
 /// Category: calculate
-/// Returns: float
 #[func]
 pub fn tanh(
     /// The angle whose hyperbolic tangent to calculate.
     angle: AngleLike,
-) -> Value {
-    Value::Float(match angle {
+) -> f64 {
+    match angle {
         AngleLike::Angle(a) => a.to_rad().tanh(),
         AngleLike::Int(n) => (n as f64).tanh(),
         AngleLike::Float(n) => n.tanh(),
-    })
+    }
 }
 
-/// Calculate the logarithm of a number.
+/// Calculates the logarithm of a number.
 ///
 /// If the base is not specified, the logarithm is calculated in base 10.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.log(100)
 /// ```
 ///
 /// Display: Logarithm
 /// Category: calculate
-/// Returns: float
 #[func]
 pub fn log(
-    /// The number whose logarithm to calculate.
-    value: f64,
-    /// The base of the logarithm.
+    /// The number whose logarithm to calculate. Must be strictly positive.
+    value: Spanned<Num>,
+    /// The base of the logarithm. May not be zero.
     #[named]
-    #[default(10.0)]
-    base: f64,
-) -> Value {
-    Value::Float(if base == 2.0 {
-        value.log2()
-    } else if base == 10.0 {
-        value.log10()
+    #[default(Spanned::new(10.0, Span::detached()))]
+    base: Spanned<f64>,
+    /// The callsite span.
+    span: Span,
+) -> SourceResult<f64> {
+    let number = value.v.float();
+    if number <= 0.0 {
+        bail!(value.span, "value must be strictly positive")
+    }
+
+    if !base.v.is_normal() {
+        bail!(base.span, "base may not be zero, NaN, infinite, or subnormal")
+    }
+
+    let result = if base.v == std::f64::consts::E {
+        number.ln()
+    } else if base.v == 2.0 {
+        number.log2()
+    } else if base.v == 10.0 {
+        number.log10()
     } else {
-        value.log(base)
-    })
+        number.log(base.v)
+    };
+
+    if result.is_infinite() || result.is_nan() {
+        bail!(span, "the result is not a real number")
+    }
+
+    Ok(result)
 }
 
-/// Round a number down to the nearest integer.
+/// Calculates the natural logarithm of a number.
+///
+/// ## Example { #example }
+/// ```example
+/// #calc.ln(calc.e)
+/// ```
+///
+/// Display: Natural Logarithm
+/// Category: calculate
+#[func]
+pub fn ln(
+    /// The number whose logarithm to calculate. Must be strictly positive.
+    value: Spanned<Num>,
+    /// The callsite span.
+    span: Span,
+) -> SourceResult<f64> {
+    let number = value.v.float();
+    if number <= 0.0 {
+        bail!(value.span, "value must be strictly positive")
+    }
+
+    let result = number.ln();
+    if result.is_infinite() {
+        bail!(span, "result close to -inf")
+    }
+
+    Ok(result)
+}
+
+/// Calculates the factorial of a number.
+///
+/// ## Example { #example }
+/// ```example
+/// #calc.fact(5)
+/// ```
+///
+/// Display: Factorial
+/// Category: calculate
+#[func]
+pub fn fact(
+    /// The number whose factorial to calculate. Must be non-negative.
+    number: u64,
+) -> StrResult<i64> {
+    Ok(fact_impl(1, number).ok_or("the result is too large")?)
+}
+
+/// Calculates a permutation.
+///
+/// ## Example { #example }
+/// ```example
+/// #calc.perm(10, 5)
+/// ```
+///
+/// Display: Permutation
+/// Category: calculate
+#[func]
+pub fn perm(
+    /// The base number. Must be non-negative.
+    base: u64,
+    /// The number of permutations. Must be non-negative.
+    numbers: u64,
+) -> StrResult<i64> {
+    // By convention.
+    if base < numbers {
+        return Ok(0);
+    }
+
+    Ok(fact_impl(base - numbers + 1, base).ok_or("the result is too large")?)
+}
+
+/// Calculates the product of a range of numbers. Used to calculate
+/// permutations. Returns None if the result is larger than `i64::MAX`
+fn fact_impl(start: u64, end: u64) -> Option<i64> {
+    // By convention
+    if end + 1 < start {
+        return Some(0);
+    }
+
+    let real_start: u64 = cmp::max(1, start);
+    let mut count: u64 = 1;
+    for i in real_start..=end {
+        count = count.checked_mul(i)?;
+    }
+
+    count.try_into().ok()
+}
+
+/// Calculates a binomial coefficient.
+///
+/// ## Example { #example }
+/// ```example
+/// #calc.binom(10, 5)
+/// ```
+///
+/// Display: Binomial
+/// Category: calculate
+#[func]
+pub fn binom(
+    /// The upper coefficient. Must be non-negative.
+    n: u64,
+    /// The lower coefficient. Must be non-negative.
+    k: u64,
+) -> StrResult<i64> {
+    Ok(binom_impl(n, k).ok_or("the result is too large")?)
+}
+
+/// Calculates a binomial coefficient, with `n` the upper coefficient and `k`
+/// the lower coefficient. Returns `None` if the result is larger than
+/// `i64::MAX`
+fn binom_impl(n: u64, k: u64) -> Option<i64> {
+    if k > n {
+        return Some(0);
+    }
+
+    // By symmetry
+    let real_k = cmp::min(n - k, k);
+    if real_k == 0 {
+        return Some(1);
+    }
+
+    let mut result: u64 = 1;
+    for i in 0..real_k {
+        result = result.checked_mul(n - i)?.checked_div(i + 1)?;
+    }
+
+    result.try_into().ok()
+}
+
+/// Calculates the greatest common divisor of two integers.
+///
+/// ## Example { #example }
+/// ```example
+/// #calc.gcd(7, 42)
+/// ```
+///
+/// Display: Greatest Common Divisor
+/// Category: calculate
+#[func]
+pub fn gcd(
+    /// The first integer.
+    a: i64,
+    /// The second integer.
+    b: i64,
+) -> i64 {
+    let (mut a, mut b) = (a, b);
+    while b != 0 {
+        let temp = b;
+        b = a % b;
+        a = temp;
+    }
+
+    a.abs()
+}
+
+/// Calculates the least common multiple of two integers.
+///
+/// ## Example { #example }
+/// ```example
+/// #calc.lcm(96, 13)
+/// ```
+///
+/// Display: Least Common Multiple
+/// Category: calculate
+#[func]
+pub fn lcm(
+    /// The first integer.
+    a: i64,
+    /// The second integer.
+    b: i64,
+) -> StrResult<i64> {
+    if a == b {
+        return Ok(a.abs());
+    }
+
+    Ok(a.checked_div(gcd(a, b))
+        .and_then(|gcd| gcd.checked_mul(b))
+        .map(|v| v.abs())
+        .ok_or("the return value is too large")?)
+}
+
+/// Rounds a number down to the nearest integer.
 ///
 /// If the number is already an integer, it is returned unchanged.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #assert(calc.floor(3.14) == 3)
 /// #assert(calc.floor(3) == 3)
@@ -388,23 +668,22 @@ pub fn log(
 ///
 /// Display: Round down
 /// Category: calculate
-/// Returns: integer
 #[func]
 pub fn floor(
     /// The number to round down.
     value: Num,
-) -> Value {
+) -> i64 {
     match value {
-        Num::Int(n) => Value::Int(n),
-        Num::Float(n) => Value::Int(n.floor() as i64),
+        Num::Int(n) => n,
+        Num::Float(n) => n.floor() as i64,
     }
 }
 
-/// Round a number up to the nearest integer.
+/// Rounds a number up to the nearest integer.
 ///
 /// If the number is already an integer, it is returned unchanged.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #assert(calc.ceil(3.14) == 4)
 /// #assert(calc.ceil(3) == 3)
@@ -413,23 +692,69 @@ pub fn floor(
 ///
 /// Display: Round up
 /// Category: calculate
-/// Returns: integer
 #[func]
 pub fn ceil(
     /// The number to round up.
     value: Num,
-) -> Value {
+) -> i64 {
     match value {
-        Num::Int(n) => Value::Int(n),
-        Num::Float(n) => Value::Int(n.ceil() as i64),
+        Num::Int(n) => n,
+        Num::Float(n) => n.ceil() as i64,
     }
 }
 
-/// Round a number to the nearest integer.
+/// Returns the integer part of a number.
+///
+/// If the number is already an integer, it is returned unchanged.
+///
+/// ## Example { #example }
+/// ```example
+/// #assert(calc.trunc(3) == 3)
+/// #assert(calc.trunc(-3.7) == -3)
+/// #assert(calc.trunc(15.9) == 15)
+/// ```
+///
+/// Display: Truncate
+/// Category: calculate
+#[func]
+pub fn trunc(
+    /// The number to truncate.
+    value: Num,
+) -> i64 {
+    match value {
+        Num::Int(n) => n,
+        Num::Float(n) => n.trunc() as i64,
+    }
+}
+
+/// Returns the fractional part of a number.
+///
+/// If the number is an integer, returns `0`.
+///
+/// ## Example { #example }
+/// ```example
+/// #assert(calc.fract(3) == 0)
+/// #calc.fract(-3.1)
+/// ```
+///
+/// Display: Fractional
+/// Category: calculate
+#[func]
+pub fn fract(
+    /// The number to truncate.
+    value: Num,
+) -> Num {
+    match value {
+        Num::Int(_) => Num::Int(0),
+        Num::Float(n) => Num::Float(n.fract()),
+    }
+}
+
+/// Rounds a number to the nearest integer.
 ///
 /// Optionally, a number of decimal places can be specified.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #assert(calc.round(3.14) == 3)
 /// #assert(calc.round(3.5) == 4)
@@ -438,7 +763,6 @@ pub fn ceil(
 ///
 /// Display: Round
 /// Category: calculate
-/// Returns: integer or float
 #[func]
 pub fn round(
     /// The number to round.
@@ -447,20 +771,20 @@ pub fn round(
     #[named]
     #[default(0)]
     digits: i64,
-) -> Value {
+) -> Num {
     match value {
-        Num::Int(n) if digits == 0 => Value::Int(n),
+        Num::Int(n) if digits == 0 => Num::Int(n),
         _ => {
             let n = value.float();
-            let factor = 10.0_f64.powi(digits as i32) as f64;
-            Value::Float((n * factor).round() / factor)
+            let factor = 10.0_f64.powi(digits as i32);
+            Num::Float((n * factor).round() / factor)
         }
     }
 }
 
-/// Clamp a number between a minimum and maximum value.
+/// Clamps a number between a minimum and maximum value.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #assert(calc.clamp(5, 0, 10) == 5)
 /// #assert(calc.clamp(5, 6, 10) == 6)
@@ -469,7 +793,6 @@ pub fn round(
 ///
 /// Display: Clamp
 /// Category: calculate
-/// Returns: integer or float
 #[func]
 pub fn clamp(
     /// The number to clamp.
@@ -478,16 +801,16 @@ pub fn clamp(
     min: Num,
     /// The inclusive maximum value.
     max: Spanned<Num>,
-) -> Value {
+) -> SourceResult<Num> {
     if max.v.float() < min.float() {
         bail!(max.span, "max must be greater than or equal to min")
     }
-    value.apply3(min, max.v, i64::clamp, f64::clamp)
+    Ok(value.apply3(min, max.v, i64::clamp, f64::clamp))
 }
 
-/// Determine the minimum of a sequence of values.
+/// Determines the minimum of a sequence of values.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.min(1, -3, -5, 20, 3, 6) \
 /// #calc.min("typst", "in", "beta")
@@ -495,20 +818,21 @@ pub fn clamp(
 ///
 /// Display: Minimum
 /// Category: calculate
-/// Returns: any
 #[func]
 pub fn min(
     /// The sequence of values from which to extract the minimum.
     /// Must not be empty.
     #[variadic]
     values: Vec<Spanned<Value>>,
-) -> Value {
-    minmax(args.span, values, Ordering::Less)?
+    /// The callsite span.
+    span: Span,
+) -> SourceResult<Value> {
+    minmax(span, values, Ordering::Less)
 }
 
-/// Determine the maximum of a sequence of values.
+/// Determines the maximum of a sequence of values.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.max(1, -3, -5, 20, 3, 6) \
 /// #calc.max("typst", "in", "beta")
@@ -516,15 +840,16 @@ pub fn min(
 ///
 /// Display: Maximum
 /// Category: calculate
-/// Returns: any
 #[func]
 pub fn max(
     /// The sequence of values from which to extract the maximum.
     /// Must not be empty.
     #[variadic]
     values: Vec<Spanned<Value>>,
-) -> Value {
-    minmax(args.span, values, Ordering::Greater)?
+    /// The callsite span.
+    span: Span,
+) -> SourceResult<Value> {
+    minmax(span, values, Ordering::Greater)
 }
 
 /// Find the minimum or maximum of a sequence of values.
@@ -539,27 +864,18 @@ fn minmax(
     };
 
     for Spanned { v, span } in iter {
-        match v.partial_cmp(&extremum) {
-            Some(ordering) => {
-                if ordering == goal {
-                    extremum = v;
-                }
-            }
-            None => bail!(
-                span,
-                "cannot compare {} and {}",
-                extremum.type_name(),
-                v.type_name(),
-            ),
+        let ordering = typst::eval::ops::compare(&v, &extremum).at(span)?;
+        if ordering == goal {
+            extremum = v;
         }
     }
 
     Ok(extremum)
 }
 
-/// Determine whether an integer is even.
+/// Determines whether an integer is even.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.even(4) \
 /// #calc.even(5) \
@@ -568,18 +884,17 @@ fn minmax(
 ///
 /// Display: Even
 /// Category: calculate
-/// Returns: boolean
 #[func]
 pub fn even(
     /// The number to check for evenness.
     value: i64,
-) -> Value {
-    Value::Bool(value % 2 == 0)
+) -> bool {
+    value % 2 == 0
 }
 
-/// Determine whether an integer is odd.
+/// Determines whether an integer is odd.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #calc.odd(4) \
 /// #calc.odd(5) \
@@ -588,73 +903,95 @@ pub fn even(
 ///
 /// Display: Odd
 /// Category: calculate
-/// Returns: boolean
 #[func]
 pub fn odd(
     /// The number to check for oddness.
     value: i64,
-) -> Value {
-    Value::Bool(value % 2 != 0)
+) -> bool {
+    value % 2 != 0
 }
 
-/// Calculate the modulus of two numbers.
+/// Calculates the remainder of two numbers.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
-/// #calc.mod(20, 6) \
-/// #calc.mod(1.75, 0.5)
+/// #calc.rem(20, 6) \
+/// #calc.rem(1.75, 0.5)
 /// ```
 ///
-/// Display: Modulus
+/// Display: Remainder
 /// Category: calculate
-/// Returns: integer or float
 #[func]
-pub fn mod_(
-    /// The dividend of the modulus.
+pub fn rem(
+    /// The dividend of the remainder.
     dividend: Num,
-    /// The divisor of the modulus.
+    /// The divisor of the remainder.
     divisor: Spanned<Num>,
-) -> Value {
+) -> SourceResult<Num> {
     if divisor.v.float() == 0.0 {
         bail!(divisor.span, "divisor must not be zero");
     }
-    dividend.apply2(divisor.v, Rem::rem, Rem::rem)
+    Ok(dividend.apply2(divisor.v, Rem::rem, Rem::rem))
+}
+
+/// Calculates the quotient of two numbers.
+///
+/// ## Example { #example }
+/// ```example
+/// #calc.quo(14, 5) \
+/// #calc.quo(3.46, 0.5)
+/// ```
+///
+/// Display: Quotient
+/// Category: calculate
+#[func]
+pub fn quo(
+    /// The dividend of the quotient.
+    dividend: Num,
+    /// The divisor of the quotient.
+    divisor: Spanned<Num>,
+) -> SourceResult<i64> {
+    if divisor.v.float() == 0.0 {
+        bail!(divisor.span, "divisor must not be zero");
+    }
+
+    Ok(floor(dividend.apply2(divisor.v, Div::div, Div::div)))
 }
 
 /// A value which can be passed to functions that work with integers and floats.
 #[derive(Debug, Copy, Clone)]
-enum Num {
+pub enum Num {
     Int(i64),
     Float(f64),
 }
 
 impl Num {
-    fn apply2(
+    pub fn apply2(
         self,
         other: Self,
         int: impl FnOnce(i64, i64) -> i64,
         float: impl FnOnce(f64, f64) -> f64,
-    ) -> Value {
+    ) -> Num {
         match (self, other) {
-            (Self::Int(a), Self::Int(b)) => Value::Int(int(a, b)),
-            (a, b) => Value::Float(float(a.float(), b.float())),
+            (Self::Int(a), Self::Int(b)) => Num::Int(int(a, b)),
+            (a, b) => Num::Float(float(a.float(), b.float())),
         }
     }
 
-    fn apply3(
+    pub fn apply3(
         self,
         other: Self,
         third: Self,
         int: impl FnOnce(i64, i64, i64) -> i64,
         float: impl FnOnce(f64, f64, f64) -> f64,
-    ) -> Value {
+    ) -> Num {
         match (self, other, third) {
-            (Self::Int(a), Self::Int(b), Self::Int(c)) => Value::Int(int(a, b, c)),
-            (a, b, c) => Value::Float(float(a.float(), b.float(), c.float())),
+            (Self::Int(a), Self::Int(b), Self::Int(c)) => Num::Int(int(a, b, c)),
+            (a, b, c) => Num::Float(float(a.float(), b.float(), c.float())),
         }
     }
 
-    fn float(self) -> f64 {
+    pub fn float(self) -> f64 {
         match self {
             Self::Int(v) => v as f64,
             Self::Float(v) => v,
@@ -662,20 +999,24 @@ impl Num {
     }
 }
 
-cast_from_value! {
+cast! {
     Num,
+    self => match self {
+        Self::Int(v) => v.into_value(),
+        Self::Float(v) => v.into_value(),
+    },
     v: i64 => Self::Int(v),
     v: f64 => Self::Float(v),
 }
 
 /// A value that can be passed to a trigonometric function.
-enum AngleLike {
+pub enum AngleLike {
     Int(i64),
     Float(f64),
     Angle(Angle),
 }
 
-cast_from_value! {
+cast! {
     AngleLike,
     v: i64 => Self::Int(v),
     v: f64 => Self::Float(v),

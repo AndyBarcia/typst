@@ -3,9 +3,9 @@ use super::*;
 /// How much the accent can be shorter than the base.
 const ACCENT_SHORT_FALL: Em = Em::new(0.5);
 
-/// Attach an accent to a base.
+/// Attaches an accent to a base.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $grave(a) = accent(a, `)$ \
 /// $arrow(a) = accent(a, arrow)$ \
@@ -29,31 +29,37 @@ pub struct AccentElem {
     ///
     /// Supported accents include:
     ///
-    /// | Accent       | Name            | Codepoint |
-    /// | ------------ | --------------- | --------- |
-    /// | Grave        | `grave`         | <code>&DiacriticalGrave;</code> |
-    /// | Acute        | `acute`         | `´`       |
-    /// | Circumflex   | `hat`           | `^`       |
-    /// | Tilde        | `tilde`         | `~`       |
-    /// | Macron       | `macron`        | `¯`       |
-    /// | Breve        | `breve`         | `˘`       |
-    /// | Dot          | `dot`           | `.`       |
-    /// | Diaeresis    | `diaer`         | `¨`       |
-    /// | Circle       | `circle`        | `∘`       |
-    /// | Double acute | `acute.double`  | `˝`       |
-    /// | Caron        | `caron`         | `ˇ`       |
-    /// | Right arrow  | `arrow`, `->`   | `→`       |
-    /// | Left arrow   | `arrow.l`, `<-` | `←`       |
+    /// | Accent        | Name            | Codepoint |
+    /// | ------------- | --------------- | --------- |
+    /// | Grave         | `grave`         | <code>&DiacriticalGrave;</code> |
+    /// | Acute         | `acute`         | `´`       |
+    /// | Circumflex    | `hat`           | `^`       |
+    /// | Tilde         | `tilde`         | `~`       |
+    /// | Macron        | `macron`        | `¯`       |
+    /// | Breve         | `breve`         | `˘`       |
+    /// | Dot           | `dot`           | `.`       |
+    /// | Double dot    | `dot.double`    | `¨`       |
+    /// | Triple dot    | `dot.triple`    | <code>&tdot;</code> |
+    /// | Quadruple dot | `dot.quad`      | <code>&DotDot;</code> |
+    /// | Diaeresis     | `diaer`         | `¨`       |
+    /// | Circle        | `circle`        | `∘`       |
+    /// | Double acute  | `acute.double`  | `˝`       |
+    /// | Caron         | `caron`         | `ˇ`       |
+    /// | Right arrow   | `arrow`, `->`   | `→`       |
+    /// | Left arrow    | `arrow.l`, `<-` | `←`       |
     #[required]
     pub accent: Accent,
 }
 
 impl LayoutMath for AccentElem {
+    #[tracing::instrument(skip(ctx))]
     fn layout_math(&self, ctx: &mut MathContext) -> SourceResult<()> {
         ctx.style(ctx.style.with_cramped(true));
         let base = ctx.layout_fragment(&self.base())?;
         ctx.unstyle();
 
+        // Preserve class to preserve automatic spacing.
+        let base_class = base.class().unwrap_or(MathClass::Normal);
         let base_attach = match &base {
             MathFragment::Glyph(base) => {
                 attachment(ctx, base.id, base.italics_correction)
@@ -88,8 +94,12 @@ impl LayoutMath for AccentElem {
         let mut frame = Frame::new(size);
         frame.set_baseline(baseline);
         frame.push_frame(accent_pos, accent);
-        frame.push_frame(base_pos, base.to_frame());
-        ctx.push(FrameFragment::new(ctx, frame).with_base_ascent(base_ascent));
+        frame.push_frame(base_pos, base.into_frame());
+        ctx.push(
+            FrameFragment::new(ctx, frame)
+                .with_class(base_class)
+                .with_base_ascent(base_ascent),
+        );
 
         Ok(())
     }
@@ -118,15 +128,12 @@ impl Accent {
     }
 }
 
-cast_from_value! {
+cast! {
     Accent,
+    self => self.0.into_value(),
     v: char => Self::new(v),
     v: Content => match v.to::<TextElem>() {
         Some(elem) => Value::Str(elem.text().into()).cast()?,
-        None => Err("expected text")?,
+        None => bail!("expected text"),
     },
-}
-
-cast_to_value! {
-    v: Accent => v.0.into()
 }

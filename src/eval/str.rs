@@ -1,13 +1,13 @@
 use std::borrow::{Borrow, Cow};
 use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
-use std::ops::{Add, AddAssign, Deref};
+use std::ops::{Add, AddAssign, Deref, Range};
 
 use ecow::EcoString;
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{cast_from_value, dict, Array, Dict, Value};
-use crate::diag::StrResult;
+use super::{cast, dict, Args, Array, Dict, Func, IntoValue, Value, Vm};
+use crate::diag::{bail, At, SourceResult, StrResult};
 use crate::geom::GenAlign;
 
 /// Create a new [`Str`] from a format string.
@@ -34,9 +34,14 @@ impl Str {
         Self(EcoString::new())
     }
 
+    /// Return `true` if the length is 0.
+    pub fn is_empty(&self) -> bool {
+        self.0.len() == 0
+    }
+
     /// The length of the string in bytes.
-    pub fn len(&self) -> i64 {
-        self.0.len() as i64
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 
     /// A string slice containing the entire string.
@@ -63,19 +68,20 @@ impl Str {
     }
 
     /// Extract the grapheme cluster at the given index.
-    pub fn at(&self, index: i64) -> StrResult<Self> {
+    pub fn at<'a>(&'a self, index: i64, default: Option<&'a str>) -> StrResult<Self> {
         let len = self.len();
-        let grapheme = self.0[self.locate(index)?..]
-            .graphemes(true)
-            .next()
-            .ok_or_else(|| out_of_bounds(index, len))?;
+        let grapheme = self
+            .locate_opt(index)?
+            .and_then(|i| self.0[i..].graphemes(true).next())
+            .or(default)
+            .ok_or_else(|| no_default_and_out_of_bounds(index, len))?;
         Ok(grapheme.into())
     }
 
     /// Extract a contiguous substring.
     pub fn slice(&self, start: i64, end: Option<i64>) -> StrResult<Self> {
         let start = self.locate(start)?;
-        let end = self.locate(end.unwrap_or(self.len()))?.max(start);
+        let end = self.locate(end.unwrap_or(self.len() as i64))?.max(start);
         Ok(self.0[start..end].into())
     }
 
@@ -118,7 +124,7 @@ impl Str {
     /// The text of the pattern's first match in this string.
     pub fn find(&self, pattern: StrPattern) -> Option<Self> {
         match pattern {
-            StrPattern::Str(pat) => self.0.contains(pat.as_str()).then(|| pat),
+            StrPattern::Str(pat) => self.0.contains(pat.as_str()).then_some(pat),
             StrPattern::Regex(re) => re.find(self).map(|m| m.as_str().into()),
         }
     }
@@ -252,18 +258,60 @@ impl Str {
     }
 
     /// Replace at most `count` occurrences of the given pattern with a
-    /// replacement string (beginning from the start).
-    pub fn replace(&self, pattern: StrPattern, with: Self, count: Option<usize>) -> Self {
-        match pattern {
-            StrPattern::Str(pat) => match count {
-                Some(n) => self.0.replacen(pat.as_str(), &with, n).into(),
-                None => self.0.replace(pat.as_str(), &with).into(),
-            },
-            StrPattern::Regex(re) => match count {
-                Some(n) => re.replacen(self, n, with.as_str()).into(),
-                None => re.replace(self, with.as_str()).into(),
-            },
+    /// replacement string or function (beginning from the start). If no count
+    /// is given, all occurrences are replaced.
+    pub fn replace(
+        &self,
+        vm: &mut Vm,
+        pattern: StrPattern,
+        with: Replacement,
+        count: Option<usize>,
+    ) -> SourceResult<Self> {
+        // Heuristic: Assume the new string is about the same length as
+        // the current string.
+        let mut output = EcoString::with_capacity(self.as_str().len());
+
+        // Replace one match of a pattern with the replacement.
+        let mut last_match = 0;
+        let mut handle_match = |range: Range<usize>, dict: Dict| -> SourceResult<()> {
+            // Push everything until the match.
+            output.push_str(&self[last_match..range.start]);
+            last_match = range.end;
+
+            // Determine and push the replacement.
+            match &with {
+                Replacement::Str(s) => output.push_str(s),
+                Replacement::Func(func) => {
+                    let args = Args::new(func.span(), [dict]);
+                    let piece = func.call_vm(vm, args)?.cast::<Str>().at(func.span())?;
+                    output.push_str(&piece);
+                }
+            }
+
+            Ok(())
+        };
+
+        // Iterate over the matches of the `pattern`.
+        let count = count.unwrap_or(usize::MAX);
+        match &pattern {
+            StrPattern::Str(pat) => {
+                for m in self.match_indices(pat.as_str()).take(count) {
+                    let (start, text) = m;
+                    handle_match(start..start + text.len(), match_to_dict(m))?;
+                }
+            }
+            StrPattern::Regex(re) => {
+                for caps in re.captures_iter(self).take(count) {
+                    // Extract the entire match over all capture groups.
+                    let m = caps.get(0).unwrap();
+                    handle_match(m.start()..m.end(), captures_to_dict(caps))?;
+                }
+            }
         }
+
+        // Push the remainder.
+        output.push_str(&self[last_match..]);
+        Ok(output.into())
     }
 
     /// Repeat the string a number of times.
@@ -276,28 +324,40 @@ impl Str {
         Ok(Self(self.0.repeat(n)))
     }
 
-    /// Resolve an index.
-    fn locate(&self, index: i64) -> StrResult<usize> {
+    /// Resolve an index, if it is within bounds.
+    /// Errors on invalid char boundaries.
+    fn locate_opt(&self, index: i64) -> StrResult<Option<usize>> {
         let wrapped =
-            if index >= 0 { Some(index) } else { self.len().checked_add(index) };
+            if index >= 0 { Some(index) } else { (self.len() as i64).checked_add(index) };
 
         let resolved = wrapped
             .and_then(|v| usize::try_from(v).ok())
-            .filter(|&v| v <= self.0.len())
-            .ok_or_else(|| out_of_bounds(index, self.len()))?;
+            .filter(|&v| v <= self.0.len());
 
-        if !self.0.is_char_boundary(resolved) {
+        if resolved.map_or(false, |i| !self.0.is_char_boundary(i)) {
             return Err(not_a_char_boundary(index));
         }
 
         Ok(resolved)
     }
+
+    /// Resolve an index or throw an out of bounds error.
+    fn locate(&self, index: i64) -> StrResult<usize> {
+        self.locate_opt(index)?
+            .ok_or_else(|| out_of_bounds(index, self.len()))
+    }
 }
 
 /// The out of bounds access error message.
 #[cold]
-fn out_of_bounds(index: i64, len: i64) -> EcoString {
+fn out_of_bounds(index: i64, len: usize) -> EcoString {
     eco_format!("string index out of bounds (index: {}, len: {})", index, len)
+}
+
+/// The out of bounds access error message when no default value was given.
+#[cold]
+fn no_default_and_out_of_bounds(index: i64, len: usize) -> EcoString {
+    eco_format!("no default value was specified and string index out of bounds (index: {}, len: {})", index, len)
 }
 
 /// The char boundary access error message.
@@ -315,10 +375,10 @@ fn string_is_empty() -> EcoString {
 /// Convert an item of std's `match_indices` to a dictionary.
 fn match_to_dict((start, text): (usize, &str)) -> Dict {
     dict! {
-        "start" => Value::Int(start as i64),
-        "end" => Value::Int((start + text.len()) as i64),
-        "text" => Value::Str(text.into()),
-        "captures" => Value::Array(Array::new()),
+        "start" => start,
+        "end" => start + text.len(),
+        "text" => text,
+        "captures" => Array::new(),
     }
 }
 
@@ -326,15 +386,13 @@ fn match_to_dict((start, text): (usize, &str)) -> Dict {
 fn captures_to_dict(cap: regex::Captures) -> Dict {
     let m = cap.get(0).expect("missing first match");
     dict! {
-        "start" => Value::Int(m.start() as i64),
-        "end" => Value::Int(m.end() as i64),
-        "text" => Value::Str(m.as_str().into()),
-        "captures" => Value::Array(
-            cap.iter()
-                .skip(1)
-                .map(|opt| opt.map_or(Value::None, |m| m.as_str().into()))
-                .collect(),
-        ),
+        "start" => m.start(),
+        "end" => m.end(),
+        "text" => m.as_str(),
+        "captures" =>  cap.iter()
+            .skip(1)
+            .map(|opt| opt.map_or(Value::None, |m| m.as_str().into_value()))
+            .collect::<Array>(),
     }
 }
 
@@ -442,6 +500,35 @@ impl From<Str> for String {
     }
 }
 
+cast! {
+    char,
+    self => Value::Str(self.into()),
+    string: Str => {
+        let mut chars = string.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => c,
+            _ => bail!("expected exactly one character"),
+        }
+    },
+}
+
+cast! {
+    &str,
+    self => Value::Str(self.into()),
+}
+
+cast! {
+    EcoString,
+    self => Value::Str(self.into()),
+    v: Str => v.into(),
+}
+
+cast! {
+    String,
+    self => Value::Str(self.into()),
+    v: Str => v.into(),
+}
+
 /// A regular expression.
 #[derive(Clone)]
 pub struct Regex(regex::Regex);
@@ -479,8 +566,8 @@ impl Hash for Regex {
     }
 }
 
-cast_from_value! {
-    Regex: "regular expression",
+cast! {
+    type Regex: "regular expression",
 }
 
 /// A pattern which can be searched for in a string.
@@ -492,7 +579,7 @@ pub enum StrPattern {
     Regex(Regex),
 }
 
-cast_from_value! {
+cast! {
     StrPattern,
     text: Str => Self::Str(text),
     regex: Regex => Self::Regex(regex),
@@ -508,11 +595,26 @@ pub enum StrSide {
     End,
 }
 
-cast_from_value! {
+cast! {
     StrSide,
     align: GenAlign => match align {
         GenAlign::Start => Self::Start,
         GenAlign::End => Self::End,
-        _ => Err("expected either `start` or `end`")?,
+        _ => bail!("expected either `start` or `end`"),
     },
+}
+
+/// A replacement for a matched [`Str`]
+pub enum Replacement {
+    /// A string a match is replaced with.
+    Str(Str),
+    /// Function of type Dict -> Str (see `captures_to_dict` or `match_to_dict`)
+    /// whose output is inserted for the match.
+    Func(Func),
+}
+
+cast! {
+    Replacement,
+    text: Str => Self::Str(text),
+    func: Func => Self::Func(func)
 }

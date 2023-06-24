@@ -4,27 +4,28 @@ use std::str::FromStr;
 use ecow::{eco_vec, EcoVec};
 use smallvec::{smallvec, SmallVec};
 use typst::eval::Tracer;
+use typst::model::DelayedErrors;
 
 use super::{FigureElem, HeadingElem, Numbering, NumberingPattern};
 use crate::layout::PageElem;
 use crate::math::EquationElem;
 use crate::prelude::*;
 
-/// Count through pages, elements, and more.
+/// Counts through pages, elements, and more.
 ///
 /// With the counter function, you can access and modify counters for pages,
 /// headings, figures, and more. Moreover, you can define custom counters for
 /// other things you want to count.
 ///
-/// ## Displaying a counter
+/// ## Displaying a counter { #displaying }
 /// To display the current value of the heading counter, you call the `counter`
 /// function with the `key` set to `heading` and then call the `display` method
 /// on the counter. To see any output, you also have to enable heading
 /// [numbering]($func/heading.numbering).
 ///
-/// The display function optionally takes an argument telling it how to
-/// format the counter. This can be a
-/// [numbering pattern or a function]($func/numbering).
+/// The `display` method optionally takes an argument telling it how to format
+/// the counter. This can be a [numbering pattern or a
+/// function]($func/numbering).
 ///
 /// ```example
 /// #set heading(numbering: "1.")
@@ -40,7 +41,7 @@ use crate::prelude::*;
 /// #counter(heading).display("I")
 /// ```
 ///
-/// ## Modifying a counter
+/// ## Modifying a counter { #modifying }
 /// To modify a counter, you can use the `step` and `update` methods:
 ///
 /// - The `step` method increases the value of the counter by one. Because
@@ -75,7 +76,49 @@ use crate::prelude::*;
 /// Still at #counter(heading).display().
 /// ```
 ///
-/// ## Page counter
+/// ## Custom counters { #custom-counters }
+/// To define your own counter, call the `counter` function with a string as a
+/// key. This key identifies the counter globally.
+///
+/// ```example
+/// #let mine = counter("mycounter")
+/// #mine.display() \
+/// #mine.step()
+/// #mine.display() \
+/// #mine.update(c => c * 3)
+/// #mine.display() \
+/// ```
+///
+/// ## How to step { #how-to-step }
+/// When you define and use a custom counter, in general, you should first step
+/// the counter and then display it. This way, the stepping behaviour of a
+/// counter can depend on the element it is stepped for. If you were writing a
+/// counter for, let's say, theorems, your theorem's definition would thus first
+/// include the counter step and only then display the counter and the theorem's
+/// contents.
+///
+/// ```example
+/// #let c = counter("theorem")
+/// #let theorem(it) = block[
+///   #c.step()
+///   *Theorem #c.display():* #it
+/// ]
+///
+/// #theorem[$1 = 1$]
+/// #theorem[$2 < 3$]
+/// ```
+///
+/// The rationale behind this is best explained on the example of the heading
+/// counter: An update to the heading counter depends on the heading's level.
+/// By stepping directly before the heading, we can correctly step from `1` to
+/// `1.1` when encountering a level 2 heading. If we were to step after the
+/// heading, we wouldn't know what to step to.
+///
+/// Because counters should always be stepped before the elements they count,
+/// they always start at zero. This way, they are at one for the first display
+/// (which happens after the first step).
+///
+/// ## Page counter { #page-counter }
 /// The page counter is special. It is automatically stepped at each pagebreak.
 /// But like other counters, you can also step it manually. For example, you
 /// could have Roman page numbers for your preface, then switch to Arabic page
@@ -102,20 +145,7 @@ use crate::prelude::*;
 /// Arabic numbers.
 /// ```
 ///
-/// ## Custom counters
-/// To define your own counter, call the `counter` function with a string as a
-/// key. This key identifies the counter globally.
-///
-/// ```example
-/// #let mine = counter("mycounter")
-/// #mine.display() \
-/// #mine.step()
-/// #mine.display() \
-/// #mine.update(c => c * 3)
-/// #mine.display() \
-/// ```
-///
-/// ## Time travel
+/// ## Time travel { #time-travel }
 /// Counters can travel through time! You can find out the final value of the
 /// counter before it is reached and even determine what the value was at any
 /// particular location in the document.
@@ -166,14 +196,14 @@ use crate::prelude::*;
 ///   which one doesn't matter. After the heading follow two calls to `step()`,
 ///   so the final value is `{(6,)}`.
 ///
-/// ## Other kinds of state
+/// ## Other kinds of state { #other-state }
 /// The `counter` function is closely related to [state]($func/state) function.
 /// Read its documentation for more details on state management in Typst and
 /// why it doesn't just use normal variables for counters.
 ///
 /// ## Methods
 /// ### display()
-/// Display the value of the counter.
+/// Displays the value of the counter.
 ///
 /// - numbering: string or function (positional)
 ///   A [numbering pattern or a function]($func/numbering), which specifies how
@@ -185,10 +215,16 @@ use crate::prelude::*;
 ///   If this is omitted, displays the counter with the numbering style for the
 ///   counted element or with the pattern `{"1.1"}` if no such style exists.
 ///
+/// - both: boolean (named)
+///   If enabled, displays the current and final top-level count together. Both
+///   can be styled through a single numbering pattern. This is used by the page
+///   numbering property to display the current and total number of pages when a
+///   pattern like `{"1 / 1"}` is given.
+///
 /// - returns: content
 ///
 /// ### step()
-/// Increase the value of the counter by one.
+/// Increases the value of the counter by one.
 ///
 /// The update will be in effect at the position where the returned content is
 /// inserted into the document. If you don't put the output into the document,
@@ -202,7 +238,7 @@ use crate::prelude::*;
 /// - returns: content
 ///
 /// ### update()
-/// Update the value of the counter.
+/// Updates the value of the counter.
 ///
 /// Just like with `step`, the update only occurs if you put the resulting
 /// content into the document.
@@ -216,7 +252,7 @@ use crate::prelude::*;
 /// - returns: content
 ///
 /// ### at()
-/// Get the value of the counter at the given location. Always returns an
+/// Gets the value of the counter at the given location. Always returns an
 /// array of integers, even if the counter has just one number.
 ///
 /// - location: location (positional, required)
@@ -227,7 +263,7 @@ use crate::prelude::*;
 /// - returns: array
 ///
 /// ### final()
-/// Get the value of the counter at the end of the document. Always returns an
+/// Gets the value of the counter at the end of the document. Always returns an
 /// array of integers, even if the counter has just one number.
 ///
 /// - location: location (positional, required)
@@ -242,18 +278,18 @@ use crate::prelude::*;
 ///
 /// Display: Counter
 /// Category: meta
-/// Returns: counter
 #[func]
 pub fn counter(
     /// The key that identifies this counter.
     ///
-    /// - If this is the [`page`]($func/page) function, counts through pages.
-    /// - If this is any other element function, counts through its elements.
     /// - If it is a string, creates a custom counter that is only affected by
-    ///   manual updates.
+    ///   manual updates,
+    /// - If this is a `{<label>}`, counts through all elements with that label,
+    /// - If this is an element function or selector, counts through its elements,
+    /// - If this is the [`page`]($func/page) function, counts through pages.
     key: CounterKey,
-) -> Value {
-    Value::dynamic(Counter::new(key))
+) -> Counter {
+    Counter::new(key)
 }
 
 /// Counts through pages, elements, and more.
@@ -272,6 +308,7 @@ impl Counter {
     }
 
     /// Call a method on counter.
+    #[tracing::instrument(skip(vm))]
     pub fn call_method(
         self,
         vm: &mut Vm,
@@ -280,17 +317,17 @@ impl Counter {
         span: Span,
     ) -> SourceResult<Value> {
         let value = match method {
-            "display" => {
-                self.display(args.eat()?, args.named("both")?.unwrap_or(false)).into()
-            }
+            "display" => self
+                .display(args.eat()?, args.named("both")?.unwrap_or(false))
+                .into_value(),
             "step" => self
                 .update(CounterUpdate::Step(
                     args.named("level")?.unwrap_or(NonZeroUsize::ONE),
                 ))
-                .into(),
-            "update" => self.update(args.expect("value or function")?).into(),
-            "at" => self.at(&mut vm.vt, args.expect("location")?)?.into(),
-            "final" => self.final_(&mut vm.vt, args.expect("location")?)?.into(),
+                .into_value(),
+            "update" => self.update(args.expect("value or function")?).into_value(),
+            "at" => self.at(&mut vm.vt, args.expect("location")?)?.into_value(),
+            "final" => self.final_(&mut vm.vt, args.expect("location")?)?.into_value(),
             _ => bail!(span, "type counter has no method `{}`", method),
         };
         args.finish()?;
@@ -305,12 +342,13 @@ impl Counter {
     /// Get the value of the state at the given location.
     pub fn at(&self, vt: &mut Vt, location: Location) -> SourceResult<CounterState> {
         let sequence = self.sequence(vt)?;
-        let offset = vt.introspector.query_before(self.selector(), location).len();
+        let offset = vt.introspector.query(&self.selector().before(location, true)).len();
         let (mut state, page) = sequence[offset].clone();
         if self.is_page() {
-            let delta = vt.introspector.page(location).get() - page.get();
+            let delta = vt.introspector.page(location).get().saturating_sub(page.get());
             state.step(NonZeroUsize::ONE, delta);
         }
+
         Ok(state)
     }
 
@@ -319,7 +357,7 @@ impl Counter {
         let sequence = self.sequence(vt)?;
         let (mut state, page) = sequence.last().unwrap().clone();
         if self.is_page() {
-            let delta = vt.introspector.pages().get() - page.get();
+            let delta = vt.introspector.pages().get().saturating_sub(page.get());
             state.step(NonZeroUsize::ONE, delta);
         }
         Ok(state)
@@ -328,13 +366,18 @@ impl Counter {
     /// Get the current and final value of the state combined in one state.
     pub fn both(&self, vt: &mut Vt, location: Location) -> SourceResult<CounterState> {
         let sequence = self.sequence(vt)?;
-        let offset = vt.introspector.query_before(self.selector(), location).len();
+        let offset = vt
+            .introspector
+            .query(&Selector::before(self.selector(), location, true))
+            .len();
         let (mut at_state, at_page) = sequence[offset].clone();
         let (mut final_state, final_page) = sequence.last().unwrap().clone();
         if self.is_page() {
-            let at_delta = vt.introspector.page(location).get() - at_page.get();
+            let at_delta =
+                vt.introspector.page(location).get().saturating_sub(at_page.get());
             at_state.step(NonZeroUsize::ONE, at_delta);
-            let final_delta = vt.introspector.pages().get() - final_page.get();
+            let final_delta =
+                vt.introspector.pages().get().saturating_sub(final_page.get());
             final_state.step(NonZeroUsize::ONE, final_delta);
         }
         Ok(CounterState(smallvec![at_state.first(), final_state.first()]))
@@ -355,9 +398,10 @@ impl Counter {
     ) -> SourceResult<EcoVec<(CounterState, NonZeroUsize)>> {
         self.sequence_impl(
             vt.world,
-            TrackedMut::reborrow_mut(&mut vt.tracer),
-            TrackedMut::reborrow_mut(&mut vt.provider),
             vt.introspector,
+            vt.locator.track(),
+            TrackedMut::reborrow_mut(&mut vt.delayed),
+            TrackedMut::reborrow_mut(&mut vt.tracer),
         )
     }
 
@@ -365,24 +409,32 @@ impl Counter {
     #[comemo::memoize]
     fn sequence_impl(
         &self,
-        world: Tracked<dyn World>,
-        tracer: TrackedMut<Tracer>,
-        provider: TrackedMut<StabilityProvider>,
+        world: Tracked<dyn World + '_>,
         introspector: Tracked<Introspector>,
+        locator: Tracked<Locator>,
+        delayed: TrackedMut<DelayedErrors>,
+        tracer: TrackedMut<Tracer>,
     ) -> SourceResult<EcoVec<(CounterState, NonZeroUsize)>> {
-        let mut vt = Vt { world, tracer, provider, introspector };
+        let mut locator = Locator::chained(locator);
+        let mut vt = Vt {
+            world,
+            introspector,
+            locator: &mut locator,
+            delayed,
+            tracer,
+        };
         let mut state = CounterState(match &self.0 {
-            CounterKey::Selector(_) => smallvec![],
-            _ => smallvec![NonZeroUsize::ONE],
+            // special case, because pages always start at one.
+            CounterKey::Page => smallvec![1],
+            _ => smallvec![0],
         });
         let mut page = NonZeroUsize::ONE;
         let mut stops = eco_vec![(state.clone(), page)];
 
-        for elem in introspector.query(self.selector()) {
+        for elem in introspector.query(&self.selector()) {
             if self.is_page() {
-                let location = elem.location().unwrap();
                 let prev = page;
-                page = introspector.page(location);
+                page = introspector.page(elem.location().unwrap());
 
                 let delta = page.get() - prev.get();
                 if delta > 0 {
@@ -412,7 +464,7 @@ impl Counter {
             Selector::Elem(UpdateElem::func(), Some(dict! { "counter" => self.clone() }));
 
         if let CounterKey::Selector(key) = &self.0 {
-            selector = Selector::Any(eco_vec![selector, key.clone()]);
+            selector = Selector::Or(eco_vec![selector, key.clone()]);
         }
 
         selector
@@ -432,8 +484,8 @@ impl Debug for Counter {
     }
 }
 
-cast_from_value! {
-    Counter: "counter",
+cast! {
+    type Counter: "counter",
 }
 
 /// Identifies a counter.
@@ -448,21 +500,18 @@ pub enum CounterKey {
     Str(Str),
 }
 
-cast_from_value! {
+cast! {
     CounterKey,
     v: Str => Self::Str(v),
     label: Label => Self::Selector(Selector::Label(label)),
-    element: ElemFunc => {
-        if element == PageElem::func() {
-            return Ok(Self::Page);
+    v: ElemFunc => {
+        if v == PageElem::func() {
+            Self::Page
+        } else {
+            Self::Selector(LocatableSelector::from_value(v.into_value())?.0)
         }
-
-        if !Content::new(element).can::<dyn Locatable>() {
-            Err(eco_format!("cannot count through {}s", element.name()))?;
-        }
-
-        Self::Selector(Selector::Elem(element, None))
-    }
+    },
+    selector: LocatableSelector => Self::Selector(selector.0),
 }
 
 impl Debug for CounterKey {
@@ -492,8 +541,8 @@ impl Debug for CounterUpdate {
     }
 }
 
-cast_from_value! {
-    CounterUpdate: "counter update",
+cast! {
+    type CounterUpdate: "counter update",
     v: CounterState => Self::Set(v),
     v: Func => Self::Func(v),
 }
@@ -506,7 +555,7 @@ pub trait Count {
 
 /// Counts through elements with different levels.
 #[derive(Debug, Clone, PartialEq, Hash)]
-pub struct CounterState(pub SmallVec<[NonZeroUsize; 3]>);
+pub struct CounterState(pub SmallVec<[usize; 3]>);
 
 impl CounterState {
     /// Advance the counter and return the numbers for the given heading.
@@ -515,10 +564,7 @@ impl CounterState {
             CounterUpdate::Set(state) => *self = state,
             CounterUpdate::Step(level) => self.step(level, 1),
             CounterUpdate::Func(func) => {
-                *self = func
-                    .call_vt(vt, self.0.iter().copied().map(Into::into))?
-                    .cast()
-                    .at(func.span())?
+                *self = func.call_vt(vt, self.0.iter().copied())?.cast().at(func.span())?
             }
         }
         Ok(())
@@ -534,13 +580,13 @@ impl CounterState {
         }
 
         while self.0.len() < level {
-            self.0.push(NonZeroUsize::ONE);
+            self.0.push(1);
         }
     }
 
     /// Get the first number of the state.
-    pub fn first(&self) -> NonZeroUsize {
-        self.0.first().copied().unwrap_or(NonZeroUsize::ONE)
+    pub fn first(&self) -> usize {
+        self.0.first().copied().unwrap_or(1)
     }
 
     /// Display the counter state with a numbering.
@@ -549,17 +595,14 @@ impl CounterState {
     }
 }
 
-cast_from_value! {
+cast! {
     CounterState,
-    num: NonZeroUsize => Self(smallvec![num]),
+    self => Value::Array(self.0.into_iter().map(IntoValue::into_value).collect()),
+    num: usize => Self(smallvec![num]),
     array: Array => Self(array
         .into_iter()
         .map(Value::cast)
         .collect::<StrResult<_>>()?),
-}
-
-cast_to_value! {
-    v: CounterState => Value::Array(v.0.into_iter().map(Into::into).collect())
 }
 
 /// Executes a display of a state.
@@ -582,34 +625,38 @@ struct DisplayElem {
 }
 
 impl Show for DisplayElem {
+    #[tracing::instrument(name = "DisplayElem::show", skip_all)]
     fn show(&self, vt: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
-        let location = self.0.location().unwrap();
-        let counter = self.counter();
-        let numbering = self
-            .numbering()
-            .or_else(|| {
-                let CounterKey::Selector(Selector::Elem(func, _)) = counter.0 else {
-                return None;
+        Ok(vt.delayed(|vt| {
+            let location = self.0.location().unwrap();
+            let counter = self.counter();
+            let numbering = self
+                .numbering()
+                .or_else(|| {
+                    let CounterKey::Selector(Selector::Elem(func, _)) = counter.0 else {
+                    return None;
+                };
+
+                    if func == HeadingElem::func() {
+                        HeadingElem::numbering_in(styles)
+                    } else if func == FigureElem::func() {
+                        FigureElem::numbering_in(styles)
+                    } else if func == EquationElem::func() {
+                        EquationElem::numbering_in(styles)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| NumberingPattern::from_str("1.1").unwrap().into());
+
+            let state = if self.both() {
+                counter.both(vt, location)?
+            } else {
+                counter.at(vt, location)?
             };
 
-                if func == HeadingElem::func() {
-                    HeadingElem::numbering_in(styles)
-                } else if func == FigureElem::func() {
-                    FigureElem::numbering_in(styles)
-                } else if func == EquationElem::func() {
-                    EquationElem::numbering_in(styles)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| NumberingPattern::from_str("1.1").unwrap().into());
-
-        let state = if self.both() {
-            counter.both(vt, location)?
-        } else {
-            counter.at(vt, location)?
-        };
-        state.display(vt, &numbering)
+            state.display(vt, &numbering)
+        }))
     }
 }
 
@@ -629,6 +676,7 @@ struct UpdateElem {
 }
 
 impl Show for UpdateElem {
+    #[tracing::instrument(name = "UpdateElem::show", skip(self))]
     fn show(&self, _: &mut Vt, _: StyleChain) -> SourceResult<Content> {
         Ok(Content::empty())
     }

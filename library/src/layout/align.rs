@@ -1,8 +1,8 @@
 use crate::prelude::*;
 
-/// Align content horizontally and vertically.
+/// Aligns content horizontally and vertically.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #set align(center)
 ///
@@ -58,6 +58,7 @@ pub struct AlignElem {
 }
 
 impl Show for AlignElem {
+    #[tracing::instrument(name = "AlignElem::show", skip_all)]
     fn show(&self, _: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
         Ok(self
             .body()

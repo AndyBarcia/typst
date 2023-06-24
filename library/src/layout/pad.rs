@@ -1,12 +1,11 @@
 use crate::prelude::*;
 
-/// Add spacing around content.
+/// Adds spacing around content.
 ///
-/// The `pad` function adds spacing around content. The spacing can be specified
-/// for each side individually, or for all sides at once by specifying a
-/// positional argument.
+/// The spacing can be specified for each side individually, or for all sides at
+/// once by specifying a positional argument.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #set align(center)
 ///
@@ -60,6 +59,7 @@ pub struct PadElem {
 }
 
 impl Layout for PadElem {
+    #[tracing::instrument(name = "PadElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,

@@ -4,19 +4,19 @@ use super::*;
 
 /// A text operator in an equation.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ tan x = (sin x)/(cos x) $
 /// $ op("custom",
 ///      limits: #true)_(n->oo) n $
 /// ```
 ///
-/// ## Predefined Operators
+/// ## Predefined Operators { #predefined }
 /// Typst predefines the operators `arccos`,  `arcsin`,  `arctan`,  `arg`,
 /// `cos`,  `cosh`,  `cot`, `ctg`, `coth`,  `csc`,  `deg`,  `det`,  `dim`,
 /// `exp`, `gcd`,  `hom`,  `mod`,  `inf`,  `ker`,  `lg`,  `lim`,  `ln`,  `log`,
-/// `max`, `min`,  `Pr`,  `sec`,  `sin`,  `sinh`,  `sup`,  `tan`, `tg`, `tanh`,
-/// `liminf`, and `limsup`.
+/// `max`, `min`,  `Pr`,  `sec`,  `sin`,  `sinc`,  `sinh`,  `sup`,  `tan`, `tg`,
+/// `tanh`, `liminf`, and `limsup`.
 ///
 /// Display: Text Operator
 /// Category: math
@@ -26,20 +26,24 @@ pub struct OpElem {
     #[required]
     pub text: EcoString,
 
-    /// Whether the operator should force attachments to display as limits.
-    ///
-    /// Defaults to `{false}`.
+    /// Whether the operator should show attachments as limits in display mode.
     #[default(false)]
     pub limits: bool,
 }
 
 impl LayoutMath for OpElem {
+    #[tracing::instrument(skip(ctx))]
     fn layout_math(&self, ctx: &mut MathContext) -> SourceResult<()> {
-        let frame = ctx.layout_content(&TextElem::packed(self.text()))?;
+        let fragment =
+            ctx.layout_text(&TextElem::new(self.text()).spanned(self.span()))?;
         ctx.push(
-            FrameFragment::new(ctx, frame)
+            FrameFragment::new(ctx, fragment.into_frame())
                 .with_class(MathClass::Large)
-                .with_limits(self.limits(ctx.styles())),
+                .with_limits(if self.limits(ctx.styles()) {
+                    Limits::Display
+                } else {
+                    Limits::Never
+                }),
         );
         Ok(())
     }
@@ -98,6 +102,7 @@ ops! {
     Pr (limits),
     sec,
     sin,
+    sinc,
     sinh,
     sup (limits),
     tan,

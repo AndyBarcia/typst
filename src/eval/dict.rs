@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use std::fmt::{self, Debug, Formatter};
+use std::hash::{Hash, Hasher};
 use std::ops::{Add, AddAssign};
 use std::sync::Arc;
 
@@ -16,28 +16,26 @@ use crate::util::{pretty_array_like, separated_list, ArcExt};
 macro_rules! __dict {
     ($($key:expr => $value:expr),* $(,)?) => {{
         #[allow(unused_mut)]
-        let mut map = std::collections::BTreeMap::new();
-        $(map.insert($key.into(), $value.into());)*
-        $crate::eval::Dict::from_map(map)
+        let mut map = $crate::eval::IndexMap::new();
+        $(map.insert($key.into(), $crate::eval::IntoValue::into_value($value));)*
+        $crate::eval::Dict::from(map)
     }};
 }
 
 #[doc(inline)]
 pub use crate::__dict as dict;
 
+#[doc(inline)]
+pub use indexmap::IndexMap;
+
 /// A reference-counted dictionary with value semantics.
-#[derive(Default, Clone, PartialEq, Hash)]
-pub struct Dict(Arc<BTreeMap<Str, Value>>);
+#[derive(Default, Clone, PartialEq)]
+pub struct Dict(Arc<IndexMap<Str, Value>>);
 
 impl Dict {
     /// Create a new, empty dictionary.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Create a new dictionary from a mapping of strings to values.
-    pub fn from_map(map: BTreeMap<Str, Value>) -> Self {
-        Self(Arc::new(map))
     }
 
     /// Whether the dictionary is empty.
@@ -46,20 +44,24 @@ impl Dict {
     }
 
     /// The number of pairs in the dictionary.
-    pub fn len(&self) -> i64 {
-        self.0.len() as i64
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 
-    /// Borrow the value the given `key` maps to.
-    pub fn at(&self, key: &str) -> StrResult<&Value> {
-        self.0.get(key).ok_or_else(|| missing_key(key))
+    /// Borrow the value the given `key` maps to,
+    pub fn at<'a>(
+        &'a self,
+        key: &str,
+        default: Option<&'a Value>,
+    ) -> StrResult<&'a Value> {
+        self.0.get(key).or(default).ok_or_else(|| missing_key_no_default(key))
     }
 
     /// Mutably borrow the value the given `key` maps to.
     pub fn at_mut(&mut self, key: &str) -> StrResult<&mut Value> {
         Arc::make_mut(&mut self.0)
             .get_mut(key)
-            .ok_or_else(|| missing_key(key))
+            .ok_or_else(|| missing_key_no_default(key))
     }
 
     /// Remove the value if the dictionary contains the given key.
@@ -81,7 +83,7 @@ impl Dict {
 
     /// Remove a mapping by `key` and return the value.
     pub fn remove(&mut self, key: &str) -> StrResult<Value> {
-        match Arc::make_mut(&mut self.0).remove(key) {
+        match Arc::make_mut(&mut self.0).shift_remove(key) {
             Some(value) => Ok(value),
             None => Err(missing_key(key)),
         }
@@ -116,7 +118,7 @@ impl Dict {
     }
 
     /// Iterate over pairs of references to the contained keys and values.
-    pub fn iter(&self) -> std::collections::btree_map::Iter<Str, Value> {
+    pub fn iter(&self) -> indexmap::map::Iter<Str, Value> {
         self.0.iter()
     }
 
@@ -171,6 +173,15 @@ impl AddAssign for Dict {
     }
 }
 
+impl Hash for Dict {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_usize(self.0.len());
+        for item in self {
+            item.hash(state);
+        }
+    }
+}
+
 impl Extend<(Str, Value)> for Dict {
     fn extend<T: IntoIterator<Item = (Str, Value)>>(&mut self, iter: T) {
         Arc::make_mut(&mut self.0).extend(iter);
@@ -185,7 +196,7 @@ impl FromIterator<(Str, Value)> for Dict {
 
 impl IntoIterator for Dict {
     type Item = (Str, Value);
-    type IntoIter = std::collections::btree_map::IntoIter<Str, Value>;
+    type IntoIter = indexmap::map::IntoIter<Str, Value>;
 
     fn into_iter(self) -> Self::IntoIter {
         Arc::take(self.0).into_iter()
@@ -194,10 +205,16 @@ impl IntoIterator for Dict {
 
 impl<'a> IntoIterator for &'a Dict {
     type Item = (&'a Str, &'a Value);
-    type IntoIter = std::collections::btree_map::Iter<'a, Str, Value>;
+    type IntoIter = indexmap::map::Iter<'a, Str, Value>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+impl From<IndexMap<Str, Value>> for Dict {
+    fn from(map: IndexMap<Str, Value>) -> Self {
+        Self(Arc::new(map))
     }
 }
 
@@ -205,4 +222,14 @@ impl<'a> IntoIterator for &'a Dict {
 #[cold]
 fn missing_key(key: &str) -> EcoString {
     eco_format!("dictionary does not contain key {:?}", Str::from(key))
+}
+
+/// The missing key access error message when no default was fiven.
+#[cold]
+fn missing_key_no_default(key: &str) -> EcoString {
+    eco_format!(
+        "dictionary does not contain key {:?} \
+         and no default value was specified",
+        Str::from(key)
+    )
 }

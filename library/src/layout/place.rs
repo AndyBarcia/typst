@@ -1,13 +1,13 @@
 use crate::prelude::*;
 
-/// Place content at an absolute position.
+/// Places content at an absolute position.
 ///
 /// Placed content will not affect the position of other content. Place is
 /// always relative to its parent container and will be in the foreground of all
 /// other content in the container. Page margins will be respected.
 ///
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #set page(height: 60pt)
 /// Hello, world!
@@ -54,6 +54,7 @@ pub struct PlaceElem {
 }
 
 impl Layout for PlaceElem {
+    #[tracing::instrument(name = "PlaceElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,

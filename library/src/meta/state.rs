@@ -2,17 +2,18 @@ use std::fmt::{self, Debug, Formatter, Write};
 
 use ecow::{eco_vec, EcoVec};
 use typst::eval::Tracer;
+use typst::model::DelayedErrors;
 
 use crate::prelude::*;
 
-/// Manage stateful parts of your document.
+/// Manages stateful parts of your document.
 ///
 /// Let's say you have some computations in your document and want to remember
 /// the result of your last computation to use it in the next one. You might try
-/// something similar the code below and would expect it to output 10, 13, 26,
-/// and 21. However this **does not work** in Typst. If you test this code, you
-/// will see that Typst complains with the following error message: _Variables
-/// from outside the function are read-only and cannot be modified._
+/// something similar to the code below and expect it to output 10, 13, 26, and
+/// 21. However this **does not work** in Typst. If you test this code, you will
+/// see that Typst complains with the following error message: _Variables from
+/// outside the function are read-only and cannot be modified._
 ///
 /// ```typ
 /// #let x = 0
@@ -29,7 +30,7 @@ use crate::prelude::*;
 /// #compute("x - 5")
 /// ```
 ///
-/// ## State and document markup
+/// ## State and document markup { #state-and-markup }
 /// Why does it do that? Because, in general, this kind of computation with side
 /// effects is problematic in document markup and Typst is upfront about that.
 /// For the results to make sense, the computation must proceed in the same
@@ -60,7 +61,7 @@ use crate::prelude::*;
 /// `template` function and only then sees the `Outline`. Just counting up would
 /// number the `Introduction` with `1` and the `Outline` with `2`.
 ///
-/// ## Managing state in Typst
+/// ## Managing state in Typst { #state-in-typst }
 /// So what do we do instead? We use Typst's state management system. Calling
 /// the `state` function with an identifying string key and an optional initial
 /// value gives you a state value which exposes a few methods. The two most
@@ -123,7 +124,7 @@ use crate::prelude::*;
 /// what you want! A good example are heading counters, which is why Typst's
 /// [counting system]($func/counter) is very similar to its state system.
 ///
-/// ## Time Travel
+/// ## Time Travel { #time-travel }
 /// By using Typst's state management system you also get time travel
 /// capabilities! By combining the state system with [`locate`]($func/locate)
 /// and [`query`]($func/query), we can find out what the value of the state will
@@ -155,7 +156,7 @@ use crate::prelude::*;
 /// #compute("x - 5")
 /// ```
 ///
-/// ## A word of caution
+/// ## A word of caution { #caution }
 /// To resolve the values of all states, Typst evaluates parts of your code
 /// multiple times. However, there is no guarantee that your state manipulation
 /// can actually be completely resolved.
@@ -176,13 +177,13 @@ use crate::prelude::*;
 /// ```
 ///
 /// In general, you should _typically_ not generate state updates from within
-/// `locate` calls or `display` calls of state or counters. Instead pass a
+/// `locate` calls or `display` calls of state or counters. Instead, pass a
 /// function to `update` that determines the value of the state based on its
 /// previous value.
 ///
 /// ## Methods
 /// ### display()
-/// Display the value of the state.
+/// Displays the value of the state.
 ///
 /// - format: function (positional)
 ///   A function which receives the value of the state and can return arbitrary
@@ -192,7 +193,7 @@ use crate::prelude::*;
 /// - returns: content
 ///
 /// ### update()
-/// Update the value of the state.
+/// Updates the value of the state.
 ///
 /// The update will be in effect at the position where the returned content is
 /// inserted into the document. If you don't put the output into the document,
@@ -208,17 +209,17 @@ use crate::prelude::*;
 /// - returns: content
 ///
 /// ### at()
-/// Get the value of the state at the given location.
+/// Gets the value of the state at the given location.
 ///
 /// - location: location (positional, required)
 ///   The location at which the state's value should be retrieved. A suitable
 ///   location can be retrieved from [`locate`]($func/locate) or
 ///   [`query`]($func/query).
 ///
-/// - returns: array
+/// - returns: any
 ///
 /// ### final()
-/// Get the value of the state at the end of the document.
+/// Gets the value of the state at the end of the document.
 ///
 /// - location: location (positional, required)
 ///   Can be any location. Why is it required then? As noted before, Typst has
@@ -229,11 +230,10 @@ use crate::prelude::*;
 ///   the evaluation of the whole module and its exports could depend on the
 ///   state's value.
 ///
-/// - returns: array
+/// - returns: any
 ///
 /// Display: State
 /// Category: meta
-/// Returns: state
 #[func]
 pub fn state(
     /// The key that identifies this state.
@@ -241,8 +241,8 @@ pub fn state(
     /// The initial value of the state.
     #[default]
     init: Value,
-) -> Value {
-    Value::dynamic(State { key, init })
+) -> State {
+    State { key, init }
 }
 
 /// A state.
@@ -256,6 +256,7 @@ pub struct State {
 
 impl State {
     /// Call a method on a state.
+    #[tracing::instrument(skip(vm))]
     pub fn call_method(
         self,
         vm: &mut Vm,
@@ -264,10 +265,10 @@ impl State {
         span: Span,
     ) -> SourceResult<Value> {
         let value = match method {
-            "display" => self.display(args.eat()?).into(),
+            "display" => self.display(args.eat()?).into_value(),
             "at" => self.at(&mut vm.vt, args.expect("location")?)?,
             "final" => self.final_(&mut vm.vt, args.expect("location")?)?,
-            "update" => self.update(args.expect("value or function")?).into(),
+            "update" => self.update(args.expect("value or function")?).into_value(),
             _ => bail!(span, "type state has no method `{}`", method),
         };
         args.finish()?;
@@ -280,13 +281,15 @@ impl State {
     }
 
     /// Get the value of the state at the given location.
+    #[tracing::instrument(skip(self, vt))]
     pub fn at(self, vt: &mut Vt, location: Location) -> SourceResult<Value> {
         let sequence = self.sequence(vt)?;
-        let offset = vt.introspector.query_before(self.selector(), location).len();
+        let offset = vt.introspector.query(&self.selector().before(location, true)).len();
         Ok(sequence[offset].clone())
     }
 
     /// Get the value of the state at the final location.
+    #[tracing::instrument(skip(self, vt))]
     pub fn final_(self, vt: &mut Vt, _: Location) -> SourceResult<Value> {
         let sequence = self.sequence(vt)?;
         Ok(sequence.last().unwrap().clone())
@@ -304,9 +307,10 @@ impl State {
     fn sequence(&self, vt: &mut Vt) -> SourceResult<EcoVec<Value>> {
         self.sequence_impl(
             vt.world,
-            TrackedMut::reborrow_mut(&mut vt.tracer),
-            TrackedMut::reborrow_mut(&mut vt.provider),
             vt.introspector,
+            vt.locator.track(),
+            TrackedMut::reborrow_mut(&mut vt.delayed),
+            TrackedMut::reborrow_mut(&mut vt.tracer),
         )
     }
 
@@ -314,16 +318,24 @@ impl State {
     #[comemo::memoize]
     fn sequence_impl(
         &self,
-        world: Tracked<dyn World>,
-        tracer: TrackedMut<Tracer>,
-        provider: TrackedMut<StabilityProvider>,
+        world: Tracked<dyn World + '_>,
         introspector: Tracked<Introspector>,
+        locator: Tracked<Locator>,
+        delayed: TrackedMut<DelayedErrors>,
+        tracer: TrackedMut<Tracer>,
     ) -> SourceResult<EcoVec<Value>> {
-        let mut vt = Vt { world, tracer, provider, introspector };
+        let mut locator = Locator::chained(locator);
+        let mut vt = Vt {
+            world,
+            introspector,
+            locator: &mut locator,
+            delayed,
+            tracer,
+        };
         let mut state = self.init.clone();
         let mut stops = eco_vec![state.clone()];
 
-        for elem in introspector.query(self.selector()) {
+        for elem in introspector.query(&self.selector()) {
             let elem = elem.to::<UpdateElem>().unwrap();
             match elem.update() {
                 StateUpdate::Set(value) => state = value,
@@ -351,8 +363,8 @@ impl Debug for State {
     }
 }
 
-cast_from_value! {
-    State: "state",
+cast! {
+    type State: "state",
 }
 
 /// An update to perform on a state.
@@ -370,8 +382,8 @@ impl Debug for StateUpdate {
     }
 }
 
-cast_from_value! {
-    StateUpdate: "state update",
+cast! {
+    type StateUpdate: "state update",
     v: Func => Self::Func(v),
     v: Value => Self::Set(v),
 }
@@ -392,13 +404,16 @@ struct DisplayElem {
 }
 
 impl Show for DisplayElem {
+    #[tracing::instrument(name = "DisplayElem::show", skip(self, vt))]
     fn show(&self, vt: &mut Vt, _: StyleChain) -> SourceResult<Content> {
-        let location = self.0.location().unwrap();
-        let value = self.state().at(vt, location)?;
-        Ok(match self.func() {
-            Some(func) => func.call_vt(vt, [value])?.display(),
-            None => value.display(),
-        })
+        Ok(vt.delayed(|vt| {
+            let location = self.0.location().unwrap();
+            let value = self.state().at(vt, location)?;
+            Ok(match self.func() {
+                Some(func) => func.call_vt(vt, [value])?.display(),
+                None => value.display(),
+            })
+        }))
     }
 }
 
@@ -418,6 +433,7 @@ struct UpdateElem {
 }
 
 impl Show for UpdateElem {
+    #[tracing::instrument(name = "UpdateElem::show")]
     fn show(&self, _: &mut Vt, _: StyleChain) -> SourceResult<Content> {
         Ok(Content::empty())
     }

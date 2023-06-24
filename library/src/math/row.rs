@@ -1,3 +1,5 @@
+use std::iter::once;
+
 use crate::layout::AlignElem;
 
 use super::*;
@@ -9,12 +11,12 @@ pub struct MathRow(Vec<MathFragment>);
 
 impl MathRow {
     pub fn new(fragments: Vec<MathFragment>) -> Self {
-        let mut iter = fragments.into_iter().peekable();
+        let iter = fragments.into_iter().peekable();
         let mut last: Option<usize> = None;
         let mut space: Option<MathFragment> = None;
         let mut resolved: Vec<MathFragment> = vec![];
 
-        while let Some(mut fragment) = iter.next() {
+        for mut fragment in iter {
             match fragment {
                 // Keep space only if supported by spaced fragments.
                 MathFragment::Space(_) => {
@@ -50,17 +52,15 @@ impl MathRow {
             }
 
             // Convert variable operators into binary operators if something
-            // precedes them.
+            // precedes them and they are not preceded by a operator or comparator.
             if fragment.class() == Some(MathClass::Vary)
                 && matches!(
                     last.and_then(|i| resolved[i].class()),
                     Some(
                         MathClass::Normal
                             | MathClass::Alphabetic
-                            | MathClass::Binary
                             | MathClass::Closing
                             | MathClass::Fence
-                            | MathClass::Relation
                     )
                 )
             {
@@ -85,12 +85,16 @@ impl MathRow {
         self.0.iter()
     }
 
-    pub fn width(&self) -> Abs {
-        self.iter().map(MathFragment::width).sum()
-    }
-
-    pub fn height(&self) -> Abs {
-        self.ascent() + self.descent()
+    /// Extract the sublines of the row.
+    ///
+    /// It is very unintuitive, but in current state of things, a `MathRow` can
+    /// contain several actual rows. That function deconstructs it to "single"
+    /// rows. Hopefully this is only a temporary hack.
+    pub fn rows(&self) -> Vec<Self> {
+        self.0
+            .split(|frag| matches!(frag, MathFragment::Linebreak))
+            .map(|slice| Self(slice.to_vec()))
+            .collect()
     }
 
     pub fn ascent(&self) -> Abs {
@@ -101,45 +105,58 @@ impl MathRow {
         self.iter().map(MathFragment::descent).max().unwrap_or_default()
     }
 
-    pub fn to_frame(self, ctx: &MathContext) -> Frame {
-        let styles = ctx.styles();
-        let align = AlignElem::alignment_in(styles).x.resolve(styles);
-        self.to_aligned_frame(ctx, &[], align)
-    }
-
-    pub fn to_fragment(self, ctx: &MathContext) -> MathFragment {
+    pub fn class(&self) -> MathClass {
+        // Predict the class of the output of 'into_fragment'
         if self.0.len() == 1 {
-            self.0.into_iter().next().unwrap()
+            self.0
+                .first()
+                .and_then(|fragment| fragment.class())
+                .unwrap_or(MathClass::Special)
         } else {
-            FrameFragment::new(ctx, self.to_frame(ctx)).into()
+            // FrameFragment::new() (inside 'into_fragment' in this branch) defaults
+            // to MathClass::Normal for its class.
+            MathClass::Normal
         }
     }
 
-    pub fn to_aligned_frame(
-        mut self,
+    pub fn into_frame(self, ctx: &MathContext) -> Frame {
+        let styles = ctx.styles();
+        let align = AlignElem::alignment_in(styles).x.resolve(styles);
+        self.into_aligned_frame(ctx, &[], align)
+    }
+
+    pub fn into_fragment(self, ctx: &MathContext) -> MathFragment {
+        if self.0.len() == 1 {
+            self.0.into_iter().next().unwrap()
+        } else {
+            FrameFragment::new(ctx, self.into_frame(ctx)).into()
+        }
+    }
+
+    pub fn into_aligned_frame(
+        self,
         ctx: &MathContext,
         points: &[Abs],
         align: Align,
     ) -> Frame {
         if self.iter().any(|frag| matches!(frag, MathFragment::Linebreak)) {
-            let fragments: Vec<_> = std::mem::take(&mut self.0);
             let leading = if ctx.style.size >= MathSize::Text {
                 ParElem::leading_in(ctx.styles())
             } else {
                 TIGHT_LEADING.scaled(ctx)
             };
 
-            let rows: Vec<_> = fragments
-                .split(|frag| matches!(frag, MathFragment::Linebreak))
-                .map(|slice| Self(slice.to_vec()))
-                .collect();
+            let mut rows: Vec<_> = self.rows();
 
-            let width = rows.iter().map(|row| row.width()).max().unwrap_or_default();
-            let points = alignments(&rows);
+            if matches!(rows.last(), Some(row) if row.0.is_empty()) {
+                rows.pop();
+            }
+
+            let AlignmentResult { points, width } = alignments(&rows);
             let mut frame = Frame::new(Size::zero());
 
             for (i, row) in rows.into_iter().enumerate() {
-                let sub = row.to_line_frame(&points, align);
+                let sub = row.into_line_frame(&points, align);
                 let size = frame.size_mut();
                 if i > 0 {
                     size.y += leading;
@@ -155,44 +172,59 @@ impl MathRow {
             }
             frame
         } else {
-            self.to_line_frame(points, align)
+            self.into_line_frame(points, align)
         }
     }
 
-    fn to_line_frame(self, points: &[Abs], align: Align) -> Frame {
+    fn into_line_frame(self, points: &[Abs], align: Align) -> Frame {
         let ascent = self.ascent();
-        let descent = self.descent();
-        let size = Size::new(Abs::zero(), ascent + descent);
-        let mut frame = Frame::new(size);
-        let mut x = Abs::zero();
+        let mut frame = Frame::new(Size::new(Abs::zero(), ascent + self.descent()));
         frame.set_baseline(ascent);
 
-        if let (Some(&first), Align::Center) = (points.first(), align) {
-            let mut offset = first;
-            for fragment in self.iter() {
-                offset -= fragment.width();
-                if matches!(fragment, MathFragment::Align) {
-                    x = offset;
-                    break;
+        let mut next_x = {
+            let mut widths = Vec::new();
+            if !points.is_empty() && align != Align::Left {
+                let mut width = Abs::zero();
+                for fragment in self.iter() {
+                    if matches!(fragment, MathFragment::Align) {
+                        widths.push(width);
+                        width = Abs::zero();
+                    } else {
+                        width += fragment.width();
+                    }
                 }
+                widths.push(width);
             }
-        }
+            let widths = widths;
 
-        let mut fragments = self.0.into_iter().peekable();
-        let mut i = 0;
-        while let Some(fragment) = fragments.next() {
+            let mut prev_points = once(Abs::zero()).chain(points.iter().copied());
+            let mut point_widths = points.iter().copied().zip(widths);
+            let mut alternator = LeftRightAlternator::Right;
+            move || match align {
+                Align::Left => prev_points.next(),
+                Align::Right => point_widths.next().map(|(point, width)| point - width),
+                _ => point_widths
+                    .next()
+                    .zip(prev_points.next())
+                    .zip(alternator.next())
+                    .map(|(((point, width), prev_point), alternator)| match alternator {
+                        LeftRightAlternator::Left => prev_point,
+                        LeftRightAlternator::Right => point - width,
+                    }),
+            }
+        };
+        let mut x = next_x().unwrap_or_default();
+
+        for fragment in self.0.into_iter() {
             if matches!(fragment, MathFragment::Align) {
-                if let Some(&point) = points.get(i) {
-                    x = point;
-                }
-                i += 1;
+                x = next_x().unwrap_or(x);
                 continue;
             }
 
             let y = ascent - fragment.ascent();
             let pos = Point::new(x, y);
             x += fragment.width();
-            frame.push_frame(pos, fragment.to_frame());
+            frame.push_frame(pos, fragment.into_frame());
         }
 
         frame.size_mut().x = x;
@@ -203,5 +235,24 @@ impl MathRow {
 impl<T: Into<MathFragment>> From<T> for MathRow {
     fn from(fragment: T) -> Self {
         Self(vec![fragment.into()])
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum LeftRightAlternator {
+    Left,
+    Right,
+}
+
+impl Iterator for LeftRightAlternator {
+    type Item = LeftRightAlternator;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let r = Some(*self);
+        match self {
+            Self::Left => *self = Self::Right,
+            Self::Right => *self = Self::Left,
+        }
+        r
     }
 }

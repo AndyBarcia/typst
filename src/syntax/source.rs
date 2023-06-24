@@ -18,6 +18,7 @@ use crate::util::{PathExt, StrExt};
 ///
 /// All line and column indices start at zero, just like byte indices. Only for
 /// user-facing display, you should add 1 to them.
+#[derive(Clone)]
 pub struct Source {
     id: SourceId,
     path: PathBuf,
@@ -28,6 +29,7 @@ pub struct Source {
 
 impl Source {
     /// Create a new source file.
+    #[tracing::instrument(skip_all)]
     pub fn new(id: SourceId, path: &Path, text: String) -> Self {
         let mut root = parse(&text);
         root.numberize(id, Span::FULL).unwrap();
@@ -107,12 +109,11 @@ impl Source {
     /// Returns the range in the new source that was ultimately reparsed.
     ///
     /// The method panics if the `replace` range is out of bounds.
+    #[track_caller]
     pub fn edit(&mut self, replace: Range<usize>, with: &str) -> Range<usize> {
         let start_byte = replace.start;
         let start_utf16 = self.byte_to_utf16(replace.start).unwrap();
-        let mut text = std::mem::take(&mut self.text).into_inner();
-        text.replace_range(replace.clone(), with);
-        self.text = Prehashed::new(text);
+        self.text.update(|text| text.replace_range(replace.clone(), with));
 
         // Remove invalidated line starts.
         let line = self.byte_to_line(start_byte).unwrap();
@@ -128,10 +129,8 @@ impl Source {
             .extend(lines_from(start_byte, start_utf16, &self.text[start_byte..]));
 
         // Incrementally reparse the replaced range.
-        let mut root = std::mem::take(&mut self.root).into_inner();
-        let range = reparse(&mut root, &self.text, replace, with.len());
-        self.root = Prehashed::new(root);
-        range
+        self.root
+            .update(|root| reparse(root, &self.text, replace, with.len()))
     }
 
     /// Get the length of the file in UTF-8 encoded bytes.
@@ -160,6 +159,7 @@ impl Source {
     /// Map a span that points into this source file to a byte range.
     ///
     /// Panics if the span does not point into this source file.
+    #[track_caller]
     pub fn range(&self, span: Span) -> Range<usize> {
         self.find(span)
             .expect("span does not point into this source file")
@@ -212,7 +212,7 @@ impl Source {
             k += c.len_utf16();
         }
 
-        (k == utf16_idx).then(|| self.text.len())
+        (k == utf16_idx).then_some(self.text.len())
     }
 
     /// Return the byte position at which the given line starts.
@@ -282,7 +282,7 @@ impl SourceId {
     }
 
     /// Extract the underlying number.
-    pub const fn into_u16(self) -> u16 {
+    pub const fn as_u16(self) -> u16 {
         self.0
     }
 }

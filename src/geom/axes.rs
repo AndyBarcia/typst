@@ -2,7 +2,6 @@ use std::any::Any;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
 use super::*;
-use crate::eval::Array;
 
 /// A container with a horizontal and vertical component.
 #[derive(Default, Copy, Clone, Eq, PartialEq, Hash)]
@@ -120,10 +119,10 @@ impl<T: Ord> Axes<T> {
 impl<T> Get<Axis> for Axes<T> {
     type Component = T;
 
-    fn get(self, axis: Axis) -> T {
+    fn get_ref(&self, axis: Axis) -> &T {
         match axis {
-            Axis::X => self.x,
-            Axis::Y => self.y,
+            Axis::X => &self.x,
+            Axis::Y => &self.y,
         }
     }
 
@@ -141,9 +140,9 @@ where
 {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         if let Axes { x: Some(x), y: Some(y) } =
-            self.as_ref().map(|v| (v as &dyn Any).downcast_ref::<Align>())
+            self.as_ref().map(|v| (v as &dyn Any).downcast_ref::<GenAlign>())
         {
-            write!(f, "{:?}-{:?}", x, y)
+            write!(f, "{:?} + {:?}", x, y)
         } else if (&self.x as &dyn Any).is::<Abs>() {
             write!(f, "Size({:?}, {:?})", self.x, self.y)
         } else {
@@ -274,19 +273,16 @@ impl BitAndAssign for Axes<bool> {
     }
 }
 
-cast_from_value! {
+cast! {
     Axes<Rel<Length>>,
+    self => array![self.x, self.y].into_value(),
     array: Array => {
         let mut iter = array.into_iter();
         match (iter.next(), iter.next(), iter.next()) {
             (Some(a), Some(b), None) => Axes::new(a.cast()?, b.cast()?),
-            _ => Err("point array must contain exactly two entries")?,
+            _ => bail!("point array must contain exactly two entries"),
         }
     },
-}
-
-cast_to_value! {
-    v: Axes<Rel<Length>> => Value::Array(array![v.x, v.y])
 }
 
 impl<T: Resolve> Resolve for Axes<T> {

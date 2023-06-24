@@ -1,14 +1,24 @@
 use std::collections::BTreeMap;
 
-use ecow::eco_format;
+use ecow::{eco_format, EcoString};
 use pdf_writer::types::{CidFontType, FontFlags, SystemInfo, UnicodeCmap};
 use pdf_writer::{Filter, Finish, Name, Rect, Str};
 use ttf_parser::{name_id, GlyphId, Tag};
+use unicode_general_category::GeneralCategory;
 
 use super::{deflate, EmExt, PdfContext, RefExt};
-use crate::util::SliceExt;
+use crate::font::Font;
+use crate::util::{Buffer, SliceExt};
+
+const CMAP_NAME: Name = Name(b"Custom");
+const SYSTEM_INFO: SystemInfo = SystemInfo {
+    registry: Str(b"Adobe"),
+    ordering: Str(b"Identity"),
+    supplement: 0,
+};
 
 /// Embed all used fonts into the PDF.
+#[tracing::instrument(skip_all)]
 pub fn write_fonts(ctx: &mut PdfContext) {
     for font in ctx.font_map.items() {
         let type0_ref = ctx.alloc.bump();
@@ -18,7 +28,7 @@ pub fn write_fonts(ctx: &mut PdfContext) {
         let data_ref = ctx.alloc.bump();
         ctx.font_refs.push(type0_ref);
 
-        let glyphs = &ctx.glyph_sets[font];
+        let glyph_set = ctx.glyph_sets.get_mut(font).unwrap();
         let metrics = font.metrics();
         let ttf = font.ttf();
 
@@ -28,12 +38,6 @@ pub fn write_fonts(ctx: &mut PdfContext) {
 
         let base_font = eco_format!("ABCDEF+{}", postscript_name);
         let base_font = Name(base_font.as_bytes());
-        let cmap_name = Name(b"Custom");
-        let system_info = SystemInfo {
-            registry: Str(b"Adobe"),
-            ordering: Str(b"Identity"),
-            supplement: 0,
-        };
 
         // Write the base font object referencing the CID font.
         ctx.writer
@@ -58,7 +62,7 @@ pub fn write_fonts(ctx: &mut PdfContext) {
         let mut cid = ctx.writer.cid_font(cid_ref);
         cid.subtype(subtype);
         cid.base_font(base_font);
-        cid.system_info(system_info);
+        cid.system_info(SYSTEM_INFO);
         cid.font_descriptor(descriptor_ref);
         cid.default_width(0.0);
 
@@ -69,7 +73,7 @@ pub fn write_fonts(ctx: &mut PdfContext) {
         // Extract the widths of all glyphs.
         let num_glyphs = ttf.number_of_glyphs();
         let mut widths = vec![0.0; num_glyphs as usize];
-        for &g in glyphs {
+        for &g in glyph_set.keys() {
             let x = ttf.glyph_hor_advance(GlyphId(g)).unwrap_or(0);
             widths[g as usize] = font.to_em(x).to_font_units();
         }
@@ -129,49 +133,14 @@ pub fn write_fonts(ctx: &mut PdfContext) {
 
         font_descriptor.finish();
 
-        // Compute a reverse mapping from glyphs to unicode.
-        let cmap = {
-            let mut mapping = BTreeMap::new();
-            for subtable in
-                ttf.tables().cmap.into_iter().flat_map(|table| table.subtables)
-            {
-                if subtable.is_unicode() {
-                    subtable.codepoints(|n| {
-                        if let Some(c) = std::char::from_u32(n) {
-                            if let Some(GlyphId(g)) = ttf.glyph_index(c) {
-                                if glyphs.contains(&g) {
-                                    mapping.insert(g, c);
-                                }
-                            }
-                        }
-                    });
-                }
-            }
-
-            let mut cmap = UnicodeCmap::new(cmap_name, system_info);
-            for (g, c) in mapping {
-                cmap.pair(g, c);
-            }
-            cmap
-        };
-
         // Write the /ToUnicode character map, which maps glyph ids back to
         // unicode codepoints to enable copying out of the PDF.
-        ctx.writer
-            .cmap(cmap_ref, &deflate(&cmap.finish()))
-            .filter(Filter::FlateDecode);
+        let cmap = create_cmap(ttf, glyph_set);
+        ctx.writer.cmap(cmap_ref, &cmap.finish());
 
         // Subset and write the font's bytes.
-        let data = font.data();
-        let subsetted = {
-            let glyphs: Vec<_> = glyphs.iter().copied().collect();
-            let profile = subsetter::Profile::pdf(&glyphs);
-            subsetter::subset(data, font.index(), profile)
-        };
-
-        // Compress and write the font's bytes.
-        let data = subsetted.as_deref().unwrap_or(data);
-        let data = deflate(data);
+        let glyphs: Vec<_> = glyph_set.keys().copied().collect();
+        let data = subset_font(font, &glyphs);
         let mut stream = ctx.writer.stream(data_ref, &data);
         stream.filter(Filter::FlateDecode);
 
@@ -181,4 +150,55 @@ pub fn write_fonts(ctx: &mut PdfContext) {
 
         stream.finish();
     }
+}
+
+/// Subset a font to the given glyphs.
+#[comemo::memoize]
+fn subset_font(font: &Font, glyphs: &[u16]) -> Buffer {
+    let data = font.data();
+    let profile = subsetter::Profile::pdf(glyphs);
+    let subsetted = subsetter::subset(data, font.index(), profile);
+    let data = subsetted.as_deref().unwrap_or(data);
+    deflate(data).into()
+}
+
+/// Create a /ToUnicode CMap.
+fn create_cmap(
+    ttf: &ttf_parser::Face,
+    glyph_set: &mut BTreeMap<u16, EcoString>,
+) -> UnicodeCmap {
+    // For glyphs that have codepoints mapping to in the font's cmap table, we
+    // prefer them over pre-existing text mappings from the document. Only
+    // things that don't have a corresponding codepoint (or only a private-use
+    // one) like the "Th" in Linux Libertine get the text of their first
+    // occurrences in the document instead.
+    for subtable in ttf.tables().cmap.into_iter().flat_map(|table| table.subtables) {
+        if !subtable.is_unicode() {
+            continue;
+        }
+
+        subtable.codepoints(|n| {
+            let Some(c) = std::char::from_u32(n) else { return };
+            if unicode_general_category::get_general_category(c)
+                == GeneralCategory::PrivateUse
+            {
+                return;
+            }
+
+            let Some(GlyphId(g)) = ttf.glyph_index(c) else { return };
+            if glyph_set.contains_key(&g) {
+                glyph_set.insert(g, c.into());
+            }
+        });
+    }
+
+    // Produce a reverse mapping from glyphs to unicode strings.
+    let mut cmap = UnicodeCmap::new(CMAP_NAME, SYSTEM_INFO);
+    for (&g, text) in glyph_set.iter() {
+        if !text.is_empty() {
+            cmap.pair_with_multiple(g, text.chars());
+        }
+    }
+
+    cmap
 }

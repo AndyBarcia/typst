@@ -1,10 +1,11 @@
 use typst::font::FontWeight;
+use typst::util::option_eq;
 
-use super::{Counter, CounterUpdate, LocalName, Numbering};
+use super::{Counter, CounterUpdate, LocalName, Numbering, Outlinable, Refable};
 use crate::layout::{BlockElem, HElem, VElem};
-use crate::meta::Count;
+use crate::meta::{Count, Supplement};
 use crate::prelude::*;
-use crate::text::{TextElem, TextSize};
+use crate::text::{SpaceElem, TextElem, TextSize};
 
 /// A section heading.
 ///
@@ -23,7 +24,7 @@ use crate::text::{TextElem, TextSize};
 /// headings from this outline, you can set the `outlined` parameter to
 /// `{false}`.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #set heading(numbering: "1.a)")
 ///
@@ -34,14 +35,14 @@ use crate::text::{TextElem, TextSize};
 /// To start, ...
 /// ```
 ///
-/// ## Syntax
+/// ## Syntax { #syntax }
 /// Headings have dedicated syntax: They can be created by starting a line with
 /// one or multiple equals signs, followed by a space. The number of equals
 /// signs determines the heading's logical nesting depth.
 ///
 /// Display: Heading
 /// Category: meta
-#[element(Locatable, Synthesize, Count, Show, Finalize, LocalName)]
+#[element(Locatable, Synthesize, Count, Show, Finalize, LocalName, Refable, Outlinable)]
 pub struct HeadingElem {
     /// The logical nesting depth of the heading, starting from one.
     #[default(NonZeroUsize::ONE)]
@@ -58,6 +59,24 @@ pub struct HeadingElem {
     /// === A sub-subsection
     /// ```
     pub numbering: Option<Numbering>,
+
+    /// A supplement for the heading.
+    ///
+    /// For references to headings, this is added before the referenced number.
+    ///
+    /// If a function is specified, it is passed the referenced heading and
+    /// should return content.
+    ///
+    /// ```example
+    /// #set heading(numbering: "1.", supplement: [Chapter])
+    ///
+    /// = Introduction <intro>
+    /// In @intro, we see how to turn
+    /// Sections into Chapters. And
+    /// in @intro[Part], it is done
+    /// manually.
+    /// ```
+    pub supplement: Smart<Option<Supplement>>,
 
     /// Whether the heading should appear in the outline.
     ///
@@ -80,14 +99,25 @@ pub struct HeadingElem {
 }
 
 impl Synthesize for HeadingElem {
-    fn synthesize(&mut self, styles: StyleChain) {
+    fn synthesize(&mut self, vt: &mut Vt, styles: StyleChain) -> SourceResult<()> {
+        // Resolve the supplement.
+        let supplement = match self.supplement(styles) {
+            Smart::Auto => TextElem::packed(self.local_name_in(styles)),
+            Smart::Custom(None) => Content::empty(),
+            Smart::Custom(Some(supplement)) => supplement.resolve(vt, [self.clone()])?,
+        };
+
         self.push_level(self.level(styles));
         self.push_numbering(self.numbering(styles));
+        self.push_supplement(Smart::Custom(Some(Supplement::Content(supplement))));
         self.push_outlined(self.outlined(styles));
+
+        Ok(())
     }
 }
 
 impl Show for HeadingElem {
+    #[tracing::instrument(name = "HeadingElem::show", skip_all)]
     fn show(&self, _: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
         let mut realized = self.body();
         if let Some(numbering) = self.numbering(styles) {
@@ -132,15 +162,76 @@ impl Count for HeadingElem {
     }
 }
 
-cast_from_value! {
+cast! {
     HeadingElem,
     v: Content => v.to::<Self>().ok_or("expected heading")?.clone(),
 }
 
+impl Refable for HeadingElem {
+    fn supplement(&self) -> Content {
+        // After synthesis, this should always be custom content.
+        match self.supplement(StyleChain::default()) {
+            Smart::Custom(Some(Supplement::Content(content))) => content,
+            _ => Content::empty(),
+        }
+    }
+
+    fn counter(&self) -> Counter {
+        Counter::of(Self::func())
+    }
+
+    fn numbering(&self) -> Option<Numbering> {
+        self.numbering(StyleChain::default())
+    }
+}
+
+impl Outlinable for HeadingElem {
+    fn outline(&self, vt: &mut Vt) -> SourceResult<Option<Content>> {
+        if !self.outlined(StyleChain::default()) {
+            return Ok(None);
+        }
+
+        let mut content = self.body();
+        if let Some(numbering) = self.numbering(StyleChain::default()) {
+            let numbers = Counter::of(Self::func())
+                .at(vt, self.0.location().unwrap())?
+                .display(vt, &numbering)?;
+            content = numbers + SpaceElem::new().pack() + content;
+        };
+
+        Ok(Some(content))
+    }
+
+    fn level(&self) -> NonZeroUsize {
+        self.level(StyleChain::default())
+    }
+}
+
 impl LocalName for HeadingElem {
-    fn local_name(&self, lang: Lang) -> &'static str {
+    fn local_name(&self, lang: Lang, region: Option<Region>) -> &'static str {
         match lang {
+            Lang::ALBANIAN => "Kapitull",
+            Lang::ARABIC => "الفصل",
+            Lang::BOKMÅL => "Kapittel",
+            Lang::CHINESE if option_eq(region, "TW") => "小節",
+            Lang::CHINESE => "小节",
+            Lang::CZECH => "Kapitola",
+            Lang::DANISH => "Afsnit",
+            Lang::DUTCH => "Hoofdstuk",
+            Lang::FILIPINO => "Seksyon",
+            Lang::FRENCH => "Chapitre",
             Lang::GERMAN => "Abschnitt",
+            Lang::ITALIAN => "Sezione",
+            Lang::NYNORSK => "Kapittel",
+            Lang::POLISH => "Sekcja",
+            Lang::PORTUGUESE => "Seção",
+            Lang::RUSSIAN => "Раздел",
+            Lang::SLOVENIAN => "Poglavje",
+            Lang::SPANISH => "Sección",
+            Lang::SWEDISH => "Kapitel",
+            Lang::TURKISH => "Bölüm",
+            Lang::UKRAINIAN => "Розділ",
+            Lang::VIETNAMESE => "Phần", // TODO: This may be wrong.
             Lang::ENGLISH | _ => "Section",
         }
     }

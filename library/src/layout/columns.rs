@@ -1,7 +1,7 @@
 use crate::prelude::*;
 use crate::text::TextElem;
 
-/// Separate a region into multiple equally sized columns.
+/// Separates a region into multiple equally sized columns.
 ///
 /// The `column` function allows to separate the interior of any container into
 /// multiple columns. It will not equalize the height of the columns, instead,
@@ -9,7 +9,7 @@ use crate::text::TextElem;
 /// height on the page. The columns function can break across pages if
 /// necessary.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// = Towards Advanced Deep Learning
 ///
@@ -50,6 +50,7 @@ pub struct ColumnsElem {
 }
 
 impl Layout for ColumnsElem {
+    #[tracing::instrument(name = "ColumnsElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -82,6 +83,7 @@ impl Layout for ColumnsElem {
             backlog: &backlog,
             last: regions.last,
             expand: Axes::new(true, regions.expand.y),
+            root: regions.root,
         };
 
         // Layout the children.
@@ -125,13 +127,13 @@ impl Layout for ColumnsElem {
     }
 }
 
-/// A forced column break.
+/// Forces a column break.
 ///
 /// The function will behave like a [page break]($func/pagebreak) when used in a
 /// single column layout or the last column on a page. Otherwise, content after
 /// the column break will be placed in the next column.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #set page(columns: 2)
 /// Preliminary findings from our

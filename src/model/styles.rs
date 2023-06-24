@@ -1,18 +1,19 @@
 use std::fmt::{self, Debug, Formatter, Write};
 use std::iter;
 use std::mem;
+use std::ptr;
 
-use ecow::{eco_format, eco_vec, EcoString, EcoVec};
+use comemo::Prehashed;
+use ecow::{eco_vec, EcoString, EcoVec};
 
-use super::{Content, ElemFunc, Element, Label, Vt};
+use super::{Content, ElemFunc, Element, Selector, Vt};
 use crate::diag::{SourceResult, Trace, Tracepoint};
-use crate::eval::{cast_from_value, Args, Cast, Dict, Func, Regex, Value, Vm};
+use crate::eval::{cast, Args, FromValue, Func, IntoValue, Value, Vm};
 use crate::syntax::Span;
-use crate::util::pretty_array_like;
 
 /// A list of style properties.
 #[derive(Default, PartialEq, Clone, Hash)]
-pub struct Styles(EcoVec<Style>);
+pub struct Styles(EcoVec<Prehashed<Style>>);
 
 impl Styles {
     /// Create a new, empty style list.
@@ -31,7 +32,7 @@ impl Styles {
     /// style map, `self` contributes the outer values and `value` is the inner
     /// one.
     pub fn set(&mut self, style: impl Into<Style>) {
-        self.0.push(style.into());
+        self.0.push(Prehashed::new(style.into()));
     }
 
     /// Remove the style that was last set.
@@ -45,23 +46,24 @@ impl Styles {
         *self = outer;
     }
 
-    /// Apply one outer styles. Like [`chain_one`](StyleChain::chain_one), but
-    /// in-place.
+    /// Apply one outer styles.
     pub fn apply_one(&mut self, outer: Style) {
-        self.0.insert(0, outer);
+        self.0.insert(0, Prehashed::new(outer));
     }
 
     /// Apply a slice of outer styles.
-    pub fn apply_slice(&mut self, outer: &[Style]) {
+    pub fn apply_slice(&mut self, outer: &[Prehashed<Style>]) {
         self.0 = outer.iter().cloned().chain(mem::take(self).0.into_iter()).collect();
     }
 
     /// Add an origin span to all contained properties.
     pub fn spanned(mut self, span: Span) -> Self {
         for entry in self.0.make_mut() {
-            if let Style::Property(property) = entry {
-                property.span = Some(span);
-            }
+            entry.update(|entry| {
+                if let Style::Property(property) = entry {
+                    property.span = Some(span);
+                }
+            });
         }
         self
     }
@@ -70,16 +72,16 @@ impl Styles {
     /// styles for the given element.
     pub fn interruption<T: Element>(&self) -> Option<Option<Span>> {
         let func = T::func();
-        self.0.iter().find_map(|entry| match entry {
-            Style::Property(property) => property.is_of(func).then(|| property.span),
-            Style::Recipe(recipe) => recipe.is_of(func).then(|| Some(recipe.span)),
+        self.0.iter().find_map(|entry| match &**entry {
+            Style::Property(property) => property.is_of(func).then_some(property.span),
+            Style::Recipe(recipe) => recipe.is_of(func).then_some(Some(recipe.span)),
         })
     }
 }
 
 impl From<Style> for Styles {
     fn from(entry: Style) -> Self {
-        Self(eco_vec![entry])
+        Self(eco_vec![Prehashed::new(entry)])
     }
 }
 
@@ -152,8 +154,17 @@ pub struct Property {
 
 impl Property {
     /// Create a new property from a key-value pair.
-    pub fn new(element: ElemFunc, name: EcoString, value: Value) -> Self {
-        Self { element, name, value, span: None }
+    pub fn new(
+        element: ElemFunc,
+        name: impl Into<EcoString>,
+        value: impl IntoValue,
+    ) -> Self {
+        Self {
+            element,
+            name: name.into(),
+            value: value.into_value(),
+            span: None,
+        }
     }
 
     /// Whether this property is the given one.
@@ -248,82 +259,6 @@ impl Debug for Recipe {
     }
 }
 
-/// A selector in a show rule.
-#[derive(Clone, PartialEq, Hash)]
-pub enum Selector {
-    /// Matches a specific type of element.
-    ///
-    /// If there is a dictionary, only elements with the fields from the
-    /// dictionary match.
-    Elem(ElemFunc, Option<Dict>),
-    /// Matches elements with a specific label.
-    Label(Label),
-    /// Matches text elements through a regular expression.
-    Regex(Regex),
-    /// Matches if any of the subselectors match.
-    Any(EcoVec<Self>),
-}
-
-impl Selector {
-    /// Define a simple text selector.
-    pub fn text(text: &str) -> Self {
-        Self::Regex(Regex::new(&regex::escape(text)).unwrap())
-    }
-
-    /// Whether the selector matches for the target.
-    pub fn matches(&self, target: &Content) -> bool {
-        match self {
-            Self::Elem(element, dict) => {
-                target.func() == *element
-                    && dict
-                        .iter()
-                        .flat_map(|dict| dict.iter())
-                        .all(|(name, value)| target.field_ref(name) == Some(value))
-            }
-            Self::Label(label) => target.label() == Some(label),
-            Self::Regex(regex) => {
-                target.func() == item!(text_func)
-                    && item!(text_str)(target).map_or(false, |text| regex.is_match(&text))
-            }
-            Self::Any(selectors) => selectors.iter().any(|sel| sel.matches(target)),
-        }
-    }
-}
-
-impl Debug for Selector {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match self {
-            Self::Elem(elem, dict) => {
-                f.write_str(elem.name())?;
-                if let Some(dict) = dict {
-                    f.write_str(".where")?;
-                    dict.fmt(f)?;
-                }
-                Ok(())
-            }
-            Self::Label(label) => label.fmt(f),
-            Self::Regex(regex) => regex.fmt(f),
-            Self::Any(selectors) => {
-                f.write_str("any")?;
-                let pieces: Vec<_> =
-                    selectors.iter().map(|sel| eco_format!("{sel:?}")).collect();
-                f.write_str(&pretty_array_like(&pieces, false))
-            }
-        }
-    }
-}
-
-cast_from_value! {
-    Selector: "selector",
-    func: Func => func
-        .element()
-        .ok_or("only element functions can be used as selectors")?
-        .select(),
-    label: Label => Self::Label(label),
-    text: EcoString => Self::text(&text),
-    regex: Regex => Self::Regex(regex),
-}
-
 /// A show rule transformation that can be applied to a match.
 #[derive(Clone, PartialEq, Hash)]
 pub enum Transform {
@@ -345,7 +280,7 @@ impl Debug for Transform {
     }
 }
 
-cast_from_value! {
+cast! {
     Transform,
     content: Content => Self::Content(content),
     func: Func => Self::Func(func),
@@ -361,7 +296,7 @@ cast_from_value! {
 #[derive(Default, Clone, Copy, Hash)]
 pub struct StyleChain<'a> {
     /// The first link of this chain.
-    head: &'a [Style],
+    head: &'a [Prehashed<Style>],
     /// The remaining links in the chain.
     tail: Option<&'a Self>,
 }
@@ -385,16 +320,8 @@ impl<'a> StyleChain<'a> {
         }
     }
 
-    /// Make the given style the first link of the this chain.
-    pub fn chain_one<'b>(&'b self, style: &'b Style) -> StyleChain<'b> {
-        StyleChain {
-            head: std::slice::from_ref(style),
-            tail: Some(self),
-        }
-    }
-
     /// Cast the first value for the given property in the chain.
-    pub fn get<T: Cast>(
+    pub fn get<T: FromValue>(
         self,
         func: ElemFunc,
         name: &'a str,
@@ -407,7 +334,7 @@ impl<'a> StyleChain<'a> {
     }
 
     /// Cast the first value for the given property in the chain.
-    pub fn get_resolve<T: Cast + Resolve>(
+    pub fn get_resolve<T: FromValue + Resolve>(
         self,
         func: ElemFunc,
         name: &'a str,
@@ -418,7 +345,7 @@ impl<'a> StyleChain<'a> {
     }
 
     /// Cast the first value for the given property in the chain.
-    pub fn get_fold<T: Cast + Fold>(
+    pub fn get_fold<T: FromValue + Fold>(
         self,
         func: ElemFunc,
         name: &'a str,
@@ -427,13 +354,13 @@ impl<'a> StyleChain<'a> {
     ) -> T::Output {
         fn next<T: Fold>(
             mut values: impl Iterator<Item = T>,
-            styles: StyleChain,
+            _styles: StyleChain,
             default: &impl Fn() -> T::Output,
         ) -> T::Output {
             values
                 .next()
-                .map(|value| value.fold(next(values, styles, default)))
-                .unwrap_or_else(|| default())
+                .map(|value| value.fold(next(values, _styles, default)))
+                .unwrap_or_else(default)
         }
         next(self.properties::<T>(func, name, inherent), self, &default)
     }
@@ -447,7 +374,7 @@ impl<'a> StyleChain<'a> {
         default: impl Fn() -> <T::Output as Fold>::Output,
     ) -> <T::Output as Fold>::Output
     where
-        T: Cast + Resolve,
+        T: FromValue + Resolve,
         T::Output: Fold,
     {
         fn next<T>(
@@ -462,7 +389,7 @@ impl<'a> StyleChain<'a> {
             values
                 .next()
                 .map(|value| value.resolve(styles).fold(next(values, styles, default)))
-                .unwrap_or_else(|| default())
+                .unwrap_or_else(default)
         }
         next(self.properties::<T>(func, name, inherent), self, &default)
     }
@@ -473,7 +400,7 @@ impl<'a> StyleChain<'a> {
     }
 
     /// Iterate over all values for the given property in the chain.
-    pub fn properties<T: Cast + 'a>(
+    pub fn properties<T: FromValue + 'a>(
         self,
         func: ElemFunc,
         name: &'a str,
@@ -528,16 +455,6 @@ impl<'a> StyleChain<'a> {
     fn pop(&mut self) {
         *self = self.tail.copied().unwrap_or_default();
     }
-
-    /// Whether two style chains contain the same pointers.
-    fn ptr_eq(self, other: Self) -> bool {
-        std::ptr::eq(self.head, other.head)
-            && match (self.tail, other.tail) {
-                (Some(a), Some(b)) => std::ptr::eq(a, b),
-                (None, None) => true,
-                _ => false,
-            }
-    }
 }
 
 impl Debug for StyleChain<'_> {
@@ -551,13 +468,18 @@ impl Debug for StyleChain<'_> {
 
 impl PartialEq for StyleChain<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.ptr_eq(*other) || crate::util::hash128(self) == crate::util::hash128(other)
+        ptr::eq(self.head, other.head)
+            && match (self.tail, other.tail) {
+                (Some(a), Some(b)) => ptr::eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
     }
 }
 
 /// An iterator over the entries in a style chain.
 struct Entries<'a> {
-    inner: std::slice::Iter<'a, Style>,
+    inner: std::slice::Iter<'a, Prehashed<Style>>,
     links: Links<'a>,
 }
 
@@ -582,7 +504,7 @@ impl<'a> Iterator for Entries<'a> {
 struct Links<'a>(Option<StyleChain<'a>>);
 
 impl<'a> Iterator for Links<'a> {
-    type Item = &'a [Style];
+    type Item = &'a [Prehashed<Style>];
 
     fn next(&mut self) -> Option<Self::Item> {
         let StyleChain { head, tail } = self.0?;
@@ -798,6 +720,15 @@ impl<T: Resolve> Resolve for Option<T> {
 }
 
 /// A property that is folded to determine its final value.
+///
+/// In the example below, the chain of stroke values is folded into a single
+/// value: `4pt + red`.
+///
+/// ```example
+/// #set rect(stroke: red)
+/// #set rect(stroke: 4pt)
+/// #rect()
+/// ```
 pub trait Fold {
     /// The type of the folded output.
     type Output;

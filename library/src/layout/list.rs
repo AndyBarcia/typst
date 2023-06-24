@@ -9,7 +9,7 @@ use super::GridLayouter;
 /// Displays a sequence of items vertically, with each item introduced by a
 /// marker.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// - *Content*
 ///   - Text
@@ -28,7 +28,7 @@ use super::GridLayouter;
 ///   )
 /// ```
 ///
-/// ## Syntax
+/// ## Syntax { #syntax }
 /// This functions also has dedicated syntax: Start a line with a hyphen,
 /// followed by a space to create a list item. A list item can contain multiple
 /// paragraphs and other block-level content. All content that is indented
@@ -37,11 +37,20 @@ use super::GridLayouter;
 /// Display: Bullet List
 /// Category: layout
 #[element(Layout)]
+#[scope(
+    scope.define("item", ListItem::func());
+    scope
+)]
 pub struct ListElem {
     /// If this is `{false}`, the items are spaced apart with [list
     /// spacing]($func/list.spacing). If it is `{true}`, they use normal
     /// [leading]($func/par.leading) instead. This makes the list more compact,
     /// which can look better if the items are short.
+    ///
+    /// In markup mode, the value of this parameter is determined based on
+    /// whether items are separated with a blank line. If items directly follow
+    /// each other, this is set to `{true}`; if items are separated by a blank
+    /// line, this is set to `{false}`.
     ///
     /// ```example
     /// - If a list has a lot of text, and
@@ -62,8 +71,6 @@ pub struct ListElem {
     /// control, you may pass a function that maps the list's nesting depth
     /// (starting from `{0}`) to a desired marker.
     ///
-    /// Default: `•`
-    ///
     /// ```example
     /// #set list(marker: [--])
     /// - A more classic list
@@ -75,10 +82,10 @@ pub struct ListElem {
     ///   - Items
     /// - Items
     /// ```
-    #[default(ListMarker::Content(vec![]))]
+    #[default(ListMarker::Content(vec![TextElem::packed('•')]))]
     pub marker: ListMarker,
 
-    /// The indent of each item's marker.
+    /// The indent of each item.
     #[resolve]
     pub indent: Length,
 
@@ -112,6 +119,7 @@ pub struct ListElem {
 }
 
 impl Layout for ListElem {
+    #[tracing::instrument(name = "ListElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -128,7 +136,11 @@ impl Layout for ListElem {
         };
 
         let depth = self.depth(styles);
-        let marker = self.marker(styles).resolve(vt, depth)?;
+        let marker = self
+            .marker(styles)
+            .resolve(vt, depth)?
+            // avoid '#set align' interference with the list
+            .aligned(Align::LEFT_TOP.into());
 
         let mut cells = vec![];
         for item in self.children() {
@@ -139,7 +151,6 @@ impl Layout for ListElem {
         }
 
         let layouter = GridLayouter::new(
-            vt,
             Axes::with_x(&[
                 Sizing::Rel(indent.into()),
                 Sizing::Auto,
@@ -152,7 +163,7 @@ impl Layout for ListElem {
             styles,
         );
 
-        Ok(layouter.layout()?.fragment)
+        Ok(layouter.layout(vt)?.fragment)
     }
 }
 
@@ -167,7 +178,7 @@ pub struct ListItem {
     pub body: Content,
 }
 
-cast_from_value! {
+cast! {
     ListItem,
     v: Content => v.to::<Self>().cloned().unwrap_or_else(|| Self::new(v.clone())),
 }
@@ -183,44 +194,40 @@ impl ListMarker {
     /// Resolve the marker for the given depth.
     fn resolve(&self, vt: &mut Vt, depth: usize) -> SourceResult<Content> {
         Ok(match self {
-            Self::Content(list) => list
-                .get(depth)
-                .or(list.last())
-                .cloned()
-                .unwrap_or_else(|| TextElem::packed('•')),
-            Self::Func(func) => func.call_vt(vt, [Value::Int(depth as i64)])?.display(),
+            Self::Content(list) => {
+                list.get(depth).or(list.last()).cloned().unwrap_or_default()
+            }
+            Self::Func(func) => func.call_vt(vt, [depth])?.display(),
         })
     }
 }
 
-cast_from_value! {
+cast! {
     ListMarker,
+    self => match self {
+        Self::Content(vec) => if vec.len() == 1 {
+            vec.into_iter().next().unwrap().into_value()
+        } else {
+            vec.into_value()
+        },
+        Self::Func(func) => func.into_value(),
+    },
     v: Content => Self::Content(vec![v]),
     array: Array => {
-        if array.len() == 0 {
-            Err("array must contain at least one marker")?;
+        if array.is_empty() {
+            bail!("array must contain at least one marker");
         }
         Self::Content(array.into_iter().map(Value::display).collect())
     },
     v: Func => Self::Func(v),
 }
 
-cast_to_value! {
-    v: ListMarker => match v {
-        ListMarker::Content(vec) => vec.into(),
-        ListMarker::Func(func) => func.into(),
-    }
-}
-
 struct Depth;
 
-cast_from_value! {
+cast! {
     Depth,
+    self => Value::None,
     _: Value => Self,
-}
-
-cast_to_value! {
-    _: Depth => Value::None
 }
 
 impl Fold for Depth {

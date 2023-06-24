@@ -2,20 +2,20 @@ use std::cmp::Ordering;
 
 use crate::prelude::*;
 
-/// Insert horizontal spacing into a paragraph.
+/// Inserts horizontal spacing into a paragraph.
 ///
 /// The spacing can be absolute, relative, or fractional. In the last case, the
 /// remaining space on the line is distributed among all fractional spacings
 /// according to their relative fractions.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// First #h(1cm) Second \
 /// First #h(30%) Second \
 /// First #h(2fr) Second #h(1fr) Third
 /// ```
 ///
-/// ## Mathematical Spacing
+/// ## Mathematical Spacing { #math-spacing }
 /// In [mathematical formulas]($category/math), you can additionally use these
 /// constants to add spacing between elements: `thin`, `med`, `thick`, `quad`.
 ///
@@ -27,7 +27,7 @@ pub struct HElem {
     #[required]
     pub amount: Spacing,
 
-    /// If true, the spacing collapses at the start or end of a paragraph.
+    /// If `{true}`, the spacing collapses at the start or end of a paragraph.
     /// Moreover, from multiple adjacent weak spacings all but the largest one
     /// collapse.
     ///
@@ -62,13 +62,13 @@ impl Behave for HElem {
     }
 }
 
-/// Insert vertical spacing into a flow of blocks.
+/// Inserts vertical spacing into a flow of blocks.
 ///
 /// The spacing can be absolute, relative, or fractional. In the last case,
 /// the remaining space on the page is distributed among all fractional spacings
 /// according to their relative fractions.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #grid(
 ///   rows: 3cm,
@@ -91,10 +91,10 @@ pub struct VElem {
     #[required]
     pub amount: Spacing,
 
-    /// If true, the spacing collapses at the start or end of a flow. Moreover,
-    /// from multiple adjacent weak spacings all but the largest one collapse.
-    /// Weak spacings will always collapse adjacent paragraph spacing, even if the
-    /// paragraph spacing is larger.
+    /// If `{true}`, the spacing collapses at the start or end of a flow.
+    /// Moreover, from multiple adjacent weak spacings all but the largest one
+    /// collapse. Weak spacings will always collapse adjacent paragraph spacing,
+    /// even if the paragraph spacing is larger.
     ///
     /// ```example
     /// The following theorem is
@@ -107,7 +107,7 @@ pub struct VElem {
     #[external]
     pub weak: bool,
 
-    /// The elements's weakness level, see also [`Behaviour`].
+    /// The element's weakness level, see also [`Behaviour`].
     #[internal]
     #[parse(args.named("weak")?.map(|v: bool| v as usize))]
     pub weakness: usize,
@@ -157,7 +157,7 @@ impl Behave for VElem {
     }
 }
 
-cast_from_value! {
+cast! {
     VElem,
     v: Content => v.to::<Self>().cloned().ok_or("expected `v` element")?,
 }
@@ -176,6 +176,14 @@ impl Spacing {
     /// Whether this is fractional spacing.
     pub fn is_fractional(self) -> bool {
         matches!(self, Self::Fr(_))
+    }
+
+    /// Whether the spacing is actually no spacing.
+    pub fn is_zero(&self) -> bool {
+        match self {
+            Self::Rel(rel) => rel.is_zero(),
+            Self::Fr(fr) => fr.is_zero(),
+        }
     }
 }
 
@@ -213,23 +221,20 @@ impl PartialOrd for Spacing {
     }
 }
 
-cast_from_value! {
+cast! {
     Spacing,
-    v: Rel<Length> => Self::Rel(v),
-    v: Fr => Self::Fr(v),
-}
-
-cast_to_value! {
-    v: Spacing => match v {
-        Spacing::Rel(rel) => {
+    self => match self {
+        Self::Rel(rel) => {
             if rel.rel.is_zero() {
-                Value::Length(rel.abs)
+                rel.abs.into_value()
             } else if rel.abs.is_zero() {
-                Value::Ratio(rel.rel)
+                rel.rel.into_value()
             } else {
-                Value::Relative(rel)
+                rel.into_value()
             }
         }
-        Spacing::Fr(fr) => Value::Fraction(fr),
-    }
+        Self::Fr(fr) => fr.into_value(),
+    },
+    v: Rel<Length> => Self::Rel(v),
+    v: Fr => Self::Fr(v),
 }

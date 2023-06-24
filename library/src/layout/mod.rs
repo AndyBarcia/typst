@@ -50,6 +50,7 @@ use std::mem;
 use typed_arena::Arena;
 use typst::diag::SourceResult;
 use typst::eval::Tracer;
+use typst::model::DelayedErrors;
 use typst::model::{applicable, realize, StyleVecBuilder};
 
 use crate::math::{EquationElem, LayoutMath};
@@ -57,7 +58,51 @@ use crate::meta::DocumentElem;
 use crate::prelude::*;
 use crate::shared::BehavedBuilder;
 use crate::text::{LinebreakElem, SmartQuoteElem, SpaceElem, TextElem};
-use crate::visualize::{CircleElem, EllipseElem, ImageElem, RectElem, SquareElem};
+use crate::visualize::{
+    CircleElem, EllipseElem, ImageElem, LineElem, PathElem, PolygonElem, RectElem,
+    SquareElem,
+};
+
+/// Hook up all layout definitions.
+pub(super) fn define(global: &mut Scope) {
+    global.define("page", PageElem::func());
+    global.define("pagebreak", PagebreakElem::func());
+    global.define("v", VElem::func());
+    global.define("par", ParElem::func());
+    global.define("parbreak", ParbreakElem::func());
+    global.define("h", HElem::func());
+    global.define("box", BoxElem::func());
+    global.define("block", BlockElem::func());
+    global.define("list", ListElem::func());
+    global.define("enum", EnumElem::func());
+    global.define("terms", TermsElem::func());
+    global.define("table", TableElem::func());
+    global.define("stack", StackElem::func());
+    global.define("grid", GridElem::func());
+    global.define("columns", ColumnsElem::func());
+    global.define("colbreak", ColbreakElem::func());
+    global.define("place", PlaceElem::func());
+    global.define("align", AlignElem::func());
+    global.define("pad", PadElem::func());
+    global.define("repeat", RepeatElem::func());
+    global.define("move", MoveElem::func());
+    global.define("scale", ScaleElem::func());
+    global.define("rotate", RotateElem::func());
+    global.define("hide", HideElem::func());
+    global.define("measure", measure_func());
+    global.define("ltr", Dir::LTR);
+    global.define("rtl", Dir::RTL);
+    global.define("ttb", Dir::TTB);
+    global.define("btt", Dir::BTT);
+    global.define("start", GenAlign::Start);
+    global.define("end", GenAlign::End);
+    global.define("left", GenAlign::Specific(Align::Left));
+    global.define("center", GenAlign::Specific(Align::Center));
+    global.define("right", GenAlign::Specific(Align::Right));
+    global.define("top", GenAlign::Specific(Align::Top));
+    global.define("horizon", GenAlign::Specific(Align::Horizon));
+    global.define("bottom", GenAlign::Specific(Align::Bottom));
+}
 
 /// Root-level layout.
 pub trait LayoutRoot {
@@ -66,17 +111,26 @@ pub trait LayoutRoot {
 }
 
 impl LayoutRoot for Content {
+    #[tracing::instrument(name = "Content::layout_root", skip_all)]
     fn layout_root(&self, vt: &mut Vt, styles: StyleChain) -> SourceResult<Document> {
         #[comemo::memoize]
         fn cached(
             content: &Content,
-            world: Tracked<dyn World>,
-            tracer: TrackedMut<Tracer>,
-            provider: TrackedMut<StabilityProvider>,
+            world: Tracked<dyn World + '_>,
             introspector: Tracked<Introspector>,
+            locator: Tracked<Locator>,
+            delayed: TrackedMut<DelayedErrors>,
+            tracer: TrackedMut<Tracer>,
             styles: StyleChain,
         ) -> SourceResult<Document> {
-            let mut vt = Vt { world, tracer, provider, introspector };
+            let mut locator = Locator::chained(locator);
+            let mut vt = Vt {
+                world,
+                introspector,
+                locator: &mut locator,
+                delayed,
+                tracer,
+            };
             let scratch = Scratch::default();
             let (realized, styles) = realize_root(&mut vt, &scratch, content, styles)?;
             realized
@@ -85,12 +139,14 @@ impl LayoutRoot for Content {
                 .layout_root(&mut vt, styles)
         }
 
+        tracing::info!("Starting layout");
         cached(
             self,
             vt.world,
-            TrackedMut::reborrow_mut(&mut vt.tracer),
-            TrackedMut::reborrow_mut(&mut vt.provider),
             vt.introspector,
+            vt.locator.track(),
+            TrackedMut::reborrow_mut(&mut vt.delayed),
+            TrackedMut::reborrow_mut(&mut vt.tracer),
             styles,
         )
     }
@@ -110,37 +166,53 @@ pub trait Layout {
     ///
     /// This element must be layouted again in the same order for the results to
     /// be valid.
+    #[tracing::instrument(name = "Layout::measure", skip_all)]
     fn measure(
         &self,
         vt: &mut Vt,
         styles: StyleChain,
         regions: Regions,
     ) -> SourceResult<Fragment> {
-        vt.provider.save();
-        let result = self.layout(vt, styles, regions);
-        vt.provider.restore();
-        result
+        let mut locator = Locator::chained(vt.locator.track());
+        let mut vt = Vt {
+            world: vt.world,
+            introspector: vt.introspector,
+            locator: &mut locator,
+            tracer: TrackedMut::reborrow_mut(&mut vt.tracer),
+            delayed: TrackedMut::reborrow_mut(&mut vt.delayed),
+        };
+        self.layout(&mut vt, styles, regions)
     }
 }
 
 impl Layout for Content {
+    #[tracing::instrument(name = "Content::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
         styles: StyleChain,
         regions: Regions,
     ) -> SourceResult<Fragment> {
+        #[allow(clippy::too_many_arguments)]
         #[comemo::memoize]
         fn cached(
             content: &Content,
-            world: Tracked<dyn World>,
-            tracer: TrackedMut<Tracer>,
-            provider: TrackedMut<StabilityProvider>,
+            world: Tracked<dyn World + '_>,
             introspector: Tracked<Introspector>,
+            locator: Tracked<Locator>,
+            delayed: TrackedMut<DelayedErrors>,
+            tracer: TrackedMut<Tracer>,
             styles: StyleChain,
             regions: Regions,
         ) -> SourceResult<Fragment> {
-            let mut vt = Vt { world, tracer, provider, introspector };
+            let mut locator = Locator::chained(locator);
+            let mut vt = Vt {
+                world,
+                introspector,
+                locator: &mut locator,
+                delayed,
+                tracer,
+            };
             let scratch = Scratch::default();
             let (realized, styles) = realize_block(&mut vt, &scratch, content, styles)?;
             realized
@@ -149,19 +221,26 @@ impl Layout for Content {
                 .layout(&mut vt, styles, regions)
         }
 
-        cached(
+        tracing::info!("Layouting `Content`");
+
+        let fragment = cached(
             self,
             vt.world,
-            TrackedMut::reborrow_mut(&mut vt.tracer),
-            TrackedMut::reborrow_mut(&mut vt.provider),
             vt.introspector,
+            vt.locator.track(),
+            TrackedMut::reborrow_mut(&mut vt.delayed),
+            TrackedMut::reborrow_mut(&mut vt.tracer),
             styles,
             regions,
-        )
+        )?;
+
+        vt.locator.visit_frames(&fragment);
+        Ok(fragment)
     }
 }
 
 /// Realize into an element that is capable of root-level layout.
+#[tracing::instrument(skip_all)]
 fn realize_root<'a>(
     vt: &mut Vt,
     scratch: &'a Scratch<'a>,
@@ -172,7 +251,7 @@ fn realize_root<'a>(
         return Ok((content.clone(), styles));
     }
 
-    let mut builder = Builder::new(vt, &scratch, true);
+    let mut builder = Builder::new(vt, scratch, true);
     builder.accept(content, styles)?;
     builder.interrupt_page(Some(styles))?;
     let (pages, shared) = builder.doc.unwrap().pages.finish();
@@ -180,6 +259,7 @@ fn realize_root<'a>(
 }
 
 /// Realize into an element that is capable of block-level layout.
+#[tracing::instrument(skip_all)]
 fn realize_block<'a>(
     vt: &mut Vt,
     scratch: &'a Scratch<'a>,
@@ -187,17 +267,20 @@ fn realize_block<'a>(
     styles: StyleChain<'a>,
 ) -> SourceResult<(Content, StyleChain<'a>)> {
     if content.can::<dyn Layout>()
+        && !content.is::<LineElem>()
         && !content.is::<RectElem>()
         && !content.is::<SquareElem>()
         && !content.is::<EllipseElem>()
         && !content.is::<CircleElem>()
         && !content.is::<ImageElem>()
+        && !content.is::<PolygonElem>()
+        && !content.is::<PathElem>()
         && !applicable(content, styles)
     {
         return Ok((content.clone(), styles));
     }
 
-    let mut builder = Builder::new(vt, &scratch, false);
+    let mut builder = Builder::new(vt, scratch, false);
     builder.accept(content, styles)?;
     builder.interrupt_par()?;
     let (children, shared) = builder.flow.0.finish();
@@ -234,7 +317,7 @@ impl<'a, 'v, 't> Builder<'a, 'v, 't> {
         Self {
             vt,
             scratch,
-            doc: top.then(|| DocBuilder::default()),
+            doc: top.then(DocBuilder::default),
             flow: FlowBuilder::default(),
             par: ParBuilder::default(),
             list: ListBuilder::default(),
@@ -251,6 +334,11 @@ impl<'a, 'v, 't> Builder<'a, 'v, 't> {
                 self.scratch.content.alloc(EquationElem::new(content.clone()).pack());
         }
 
+        if let Some(realized) = realize(self.vt, content, styles)? {
+            let stored = self.scratch.content.alloc(realized);
+            return self.accept(stored, styles);
+        }
+
         if let Some((elem, local)) = content.to_styled() {
             return self.styled(elem, local, styles);
         }
@@ -260,11 +348,6 @@ impl<'a, 'v, 't> Builder<'a, 'v, 't> {
                 self.accept(elem, styles)?;
             }
             return Ok(());
-        }
-
-        if let Some(realized) = realize(self.vt, content, styles)? {
-            let stored = self.scratch.content.alloc(realized);
-            return self.accept(stored, styles);
         }
 
         if self.list.accept(content, styles) {
@@ -291,7 +374,7 @@ impl<'a, 'v, 't> Builder<'a, 'v, 't> {
             .to::<PagebreakElem>()
             .map_or(false, |pagebreak| !pagebreak.weak(styles));
 
-        self.interrupt_page(keep.then(|| styles))?;
+        self.interrupt_page(keep.then_some(styles))?;
 
         if let Some(doc) = &mut self.doc {
             if doc.accept(content, styles) {
@@ -314,7 +397,7 @@ impl<'a, 'v, 't> Builder<'a, 'v, 't> {
     ) -> SourceResult<()> {
         let stored = self.scratch.styles.alloc(styles);
         let styles = stored.chain(map);
-        self.interrupt_style(&map, None)?;
+        self.interrupt_style(map, None)?;
         self.accept(elem, styles)?;
         self.interrupt_style(map, Some(styles))?;
         Ok(())
@@ -388,8 +471,8 @@ impl<'a, 'v, 't> Builder<'a, 'v, 't> {
             } else {
                 shared
             };
-            let page = PageElem::new(FlowElem::new(flow.to_vec()).pack()).pack();
-            let stored = self.scratch.content.alloc(page);
+            let page = PageElem::new(FlowElem::new(flow.to_vec()).pack());
+            let stored = self.scratch.content.alloc(page.pack());
             self.accept(stored, styles)?;
         }
         Ok(())
@@ -402,17 +485,28 @@ struct DocBuilder<'a> {
     pages: StyleVecBuilder<'a, Content>,
     /// Whether to keep a following page even if it is empty.
     keep_next: bool,
+    /// Whether the next page should be cleared to an even or odd number.
+    clear_next: Option<Parity>,
 }
 
 impl<'a> DocBuilder<'a> {
     fn accept(&mut self, content: &Content, styles: StyleChain<'a>) -> bool {
         if let Some(pagebreak) = content.to::<PagebreakElem>() {
             self.keep_next = !pagebreak.weak(styles);
+            self.clear_next = pagebreak.to(styles);
             return true;
         }
 
-        if content.is::<PageElem>() {
-            self.pages.push(content.clone(), styles);
+        if let Some(page) = content.to::<PageElem>() {
+            let elem = if let Some(clear_to) = self.clear_next.take() {
+                let mut page = page.clone();
+                page.push_clear_to(Some(clear_to));
+                page.pack()
+            } else {
+                content.clone()
+            };
+
+            self.pages.push(elem, styles);
             self.keep_next = false;
             return true;
         }
@@ -423,7 +517,11 @@ impl<'a> DocBuilder<'a> {
 
 impl Default for DocBuilder<'_> {
     fn default() -> Self {
-        Self { pages: StyleVecBuilder::new(), keep_next: true }
+        Self {
+            pages: StyleVecBuilder::new(),
+            keep_next: true,
+            clear_next: None,
+        }
     }
 }
 
@@ -466,11 +564,15 @@ impl<'a> FlowBuilder<'a> {
                 self.0.push(spacing.pack(), styles);
             }
 
-            let above = BlockElem::above_in(styles);
-            let below = BlockElem::below_in(styles);
-            self.0.push(above.clone().pack(), styles);
+            let (above, below) = if let Some(block) = content.to::<BlockElem>() {
+                (block.above(styles), block.below(styles))
+            } else {
+                (BlockElem::above_in(styles), BlockElem::below_in(styles))
+            };
+
+            self.0.push(above.pack(), styles);
             self.0.push(content.clone(), styles);
-            self.0.push(below.clone().pack(), styles);
+            self.0.push(below.pack(), styles);
             return true;
         }
 

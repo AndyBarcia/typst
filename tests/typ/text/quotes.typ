@@ -13,11 +13,20 @@
 #set text(lang: "de", region: "CH")
 "Das Pferd frisst keinen Gurkensalat" war der erste jemals am 'Fernsprecher' gesagte Satz.
 
+#set text(lang: "es", region: none)
+"El caballo no come ensalada de pepino" fue la primera frase pronunciada por 'teléfono'.
+
+#set text(lang: "es", region: "MX")
+"El caballo no come ensalada de pepino" fue la primera frase pronunciada por 'teléfono'.
+
 #set text(lang: "fr", region: none)
 "Le cheval ne mange pas de salade de concombres" est la première phrase jamais prononcée au 'téléphone'.
 
 #set text(lang: "fi")
 "Hevonen ei syö kurkkusalaattia" oli ensimmäinen koskaan 'puhelimessa' lausuttu lause.
+
+#set text(lang: "he")
+"הסוס לא אוכל סלט מלפפונים" היה המשפט ההראשון שנאמר ב 'טלפון'.
 
 #set text(lang: "ro")
 "Calul nu mănâncă salată de castraveți" a fost prima propoziție rostită vreodată la 'telefon'.

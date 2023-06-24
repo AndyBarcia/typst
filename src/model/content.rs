@@ -3,20 +3,22 @@ use std::fmt::{self, Debug, Formatter, Write};
 use std::iter::Sum;
 use std::ops::{Add, AddAssign};
 
+use comemo::Prehashed;
 use ecow::{eco_format, EcoString, EcoVec};
 
 use super::{
     element, Behave, Behaviour, ElemFunc, Element, Fold, Guard, Label, Locatable,
-    Location, Recipe, Style, Styles, Synthesize,
+    Location, Recipe, Selector, Style, Styles, Synthesize,
 };
 use crate::diag::{SourceResult, StrResult};
 use crate::doc::Meta;
-use crate::eval::{Cast, Str, Value, Vm};
+use crate::eval::{Dict, FromValue, IntoValue, Str, Value, Vm};
 use crate::syntax::Span;
 use crate::util::pretty_array_like;
 
 /// Composable representation of styled content.
 #[derive(Clone, Hash)]
+#[allow(clippy::derived_hash_with_manual_eq)]
 pub struct Content {
     func: ElemFunc,
     attrs: EcoVec<Attr>,
@@ -27,8 +29,8 @@ pub struct Content {
 enum Attr {
     Span(Span),
     Field(EcoString),
-    Value(Value),
-    Child(Content),
+    Value(Prehashed<Value>),
+    Child(Prehashed<Content>),
     Styles(Styles),
     Prepared,
     Guard(Guard),
@@ -52,9 +54,11 @@ impl Content {
         let Some(first) = iter.next() else { return Self::empty() };
         let Some(second) = iter.next() else { return first };
         let mut content = Content::empty();
-        content.attrs.push(Attr::Child(first));
-        content.attrs.push(Attr::Child(second));
-        content.attrs.extend(iter.map(Attr::Child));
+        content.attrs.push(Attr::Child(Prehashed::new(first)));
+        content.attrs.push(Attr::Child(Prehashed::new(second)));
+        content
+            .attrs
+            .extend(iter.map(|child| Attr::Child(Prehashed::new(child))));
         content
     }
 
@@ -104,6 +108,12 @@ impl Content {
         (self.func.0.vtable)(TypeId::of::<C>()).is_some()
     }
 
+    /// Whether the contained element has the given capability.
+    /// Where the capability is given by a `TypeId`.
+    pub fn can_type_id(&self, type_id: TypeId) -> bool {
+        (self.func.0.vtable)(type_id).is_some()
+    }
+
     /// Cast to a trait object if the contained element has the given
     /// capability.
     pub fn with<C>(&self) -> Option<&C>
@@ -143,33 +153,33 @@ impl Content {
     pub fn with_field(
         mut self,
         name: impl Into<EcoString>,
-        value: impl Into<Value>,
+        value: impl IntoValue,
     ) -> Self {
         self.push_field(name, value);
         self
     }
 
     /// Attach a field to the content.
-    pub fn push_field(&mut self, name: impl Into<EcoString>, value: impl Into<Value>) {
+    pub fn push_field(&mut self, name: impl Into<EcoString>, value: impl IntoValue) {
         let name = name.into();
         if let Some(i) = self.attrs.iter().position(|attr| match attr {
             Attr::Field(field) => *field == name,
             _ => false,
         }) {
-            self.attrs.make_mut()[i + 1] = Attr::Value(value.into());
+            self.attrs.make_mut()[i + 1] =
+                Attr::Value(Prehashed::new(value.into_value()));
         } else {
             self.attrs.push(Attr::Field(name));
-            self.attrs.push(Attr::Value(value.into()));
+            self.attrs.push(Attr::Value(Prehashed::new(value.into_value())));
         }
     }
 
     /// Access a field on the content.
     pub fn field(&self, name: &str) -> Option<Value> {
-        if let Some(iter) = self.to_sequence() {
-            (name == "children")
-                .then(|| Value::Array(iter.cloned().map(Value::Content).collect()))
-        } else if let Some((child, _)) = self.to_styled() {
-            (name == "child").then(|| Value::Content(child.clone()))
+        if let (Some(iter), "children") = (self.to_sequence(), name) {
+            Some(Value::Array(iter.cloned().map(Value::Content).collect()))
+        } else if let (Some((child, _)), "child") = (self.to_styled(), name) {
+            Some(Value::Content(child.clone()))
         } else {
             self.field_ref(name).cloned()
         }
@@ -217,7 +227,7 @@ impl Content {
     }
 
     /// Try to access a field on the content as a specified type.
-    pub fn cast_field<T: Cast>(&self, name: &str) -> Option<T> {
+    pub fn cast_field<T: FromValue>(&self, name: &str) -> Option<T> {
         match self.field(name) {
             Some(value) => value.cast().ok(),
             None => None,
@@ -226,7 +236,7 @@ impl Content {
 
     /// Expect a field on the content to exist as a specified type.
     #[track_caller]
-    pub fn expect_field<T: Cast>(&self, name: &str) -> T {
+    pub fn expect_field<T: FromValue>(&self, name: &str) -> T {
         self.field(name).unwrap().cast().unwrap()
     }
 
@@ -236,8 +246,17 @@ impl Content {
     }
 
     /// Borrow the value of the given field.
-    pub fn at(&self, field: &str) -> StrResult<Value> {
-        self.field(field).ok_or_else(|| missing_field(field))
+    pub fn at(&self, field: &str, default: Option<Value>) -> StrResult<Value> {
+        self.field(field)
+            .or(default)
+            .ok_or_else(|| missing_field_no_default(field))
+    }
+
+    /// Return the fields of the content as a dict.
+    pub fn dict(&self) -> Dict {
+        self.fields()
+            .map(|(key, value)| (key.to_owned().into(), value))
+            .collect()
     }
 
     /// The content's label.
@@ -278,7 +297,7 @@ impl Content {
             self
         } else {
             let mut content = Content::new(StyledElem::func());
-            content.attrs.push(Attr::Child(self));
+            content.attrs.push(Attr::Child(Prehashed::new(self)));
             content.attrs.push(Attr::Styles(styles));
             content
         }
@@ -293,12 +312,9 @@ impl Content {
         }
     }
 
-    /// Repeat this content `n` times.
-    pub fn repeat(&self, n: i64) -> StrResult<Self> {
-        let count = usize::try_from(n)
-            .map_err(|_| format!("cannot repeat this content {} times", n))?;
-
-        Ok(Self::sequence(vec![self.clone(); count]))
+    /// Repeat this content `count` times.
+    pub fn repeat(&self, count: usize) -> Self {
+        Self::sequence(vec![self.clone(); count])
     }
 
     /// Disable a show rule recipe.
@@ -346,6 +362,78 @@ impl Content {
     /// Attach a location to this content.
     pub fn set_location(&mut self, location: Location) {
         self.attrs.push(Attr::Location(location));
+    }
+
+    /// Queries the content tree for all elements that match the given selector.
+    ///
+    /// Elements produced in `show` rules will not be included in the results.
+    #[tracing::instrument(skip_all)]
+    pub fn query(&self, selector: Selector) -> Vec<&Content> {
+        let mut results = Vec::new();
+        self.traverse(&mut |element| {
+            if selector.matches(element) {
+                results.push(element);
+            }
+        });
+        results
+    }
+
+    /// Queries the content tree for the first element that match the given
+    /// selector.
+    ///
+    /// Elements produced in `show` rules will not be included in the results.
+    #[tracing::instrument(skip_all)]
+    pub fn query_first(&self, selector: Selector) -> Option<&Content> {
+        let mut result = None;
+        self.traverse(&mut |element| {
+            if result.is_none() && selector.matches(element) {
+                result = Some(element);
+            }
+        });
+        result
+    }
+
+    /// Extracts the plain text of this content.
+    pub fn plain_text(&self) -> EcoString {
+        let mut text = EcoString::new();
+        self.traverse(&mut |element| {
+            if let Some(textable) = element.with::<dyn PlainText>() {
+                textable.plain_text(&mut text);
+            }
+        });
+        text
+    }
+
+    /// Traverse this content.
+    fn traverse<'a, F>(&'a self, f: &mut F)
+    where
+        F: FnMut(&'a Content),
+    {
+        f(self);
+
+        for attr in &self.attrs {
+            match attr {
+                Attr::Child(child) => child.traverse(f),
+                Attr::Value(value) => walk_value(value, f),
+                _ => {}
+            }
+        }
+
+        /// Walks a given value to find any content that matches the selector.
+        fn walk_value<'a, F>(value: &'a Value, f: &mut F)
+        where
+            F: FnMut(&'a Content),
+        {
+            match value {
+                Value::Content(content) => content.traverse(f),
+                Value::Array(array) => {
+                    for value in array {
+                        walk_value(value, f);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -404,11 +492,11 @@ impl Add for Content {
                 lhs
             }
             (true, false) => {
-                lhs.attrs.push(Attr::Child(rhs));
+                lhs.attrs.push(Attr::Child(Prehashed::new(rhs)));
                 lhs
             }
             (false, true) => {
-                rhs.attrs.insert(0, Attr::Child(lhs));
+                rhs.attrs.insert(0, Attr::Child(Prehashed::new(lhs)));
                 rhs
             }
             (false, false) => Self::sequence([lhs, rhs]),
@@ -509,9 +597,18 @@ impl Fold for Vec<Meta> {
     }
 }
 
-/// The missing key access error message.
+/// Tries to extract the plain-text representation of the element.
+pub trait PlainText {
+    /// Write this element's plain text into the given buffer.
+    fn plain_text(&self, text: &mut EcoString);
+}
+
+/// The missing key access error message when no default value was given.
 #[cold]
-#[track_caller]
-fn missing_field(key: &str) -> EcoString {
-    eco_format!("content does not contain field {:?}", Str::from(key))
+fn missing_field_no_default(key: &str) -> EcoString {
+    eco_format!(
+        "content does not contain field {:?} and \
+         no default value was specified",
+        Str::from(key)
+    )
 }

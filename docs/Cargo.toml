@@ -1,8 +1,10 @@
 [package]
 name = "typst-docs"
-version = "0.0.0"
-authors = ["The Typst Project Developers"]
-edition = "2021"
+version.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+edition.workspace = true
+publish = false
 
 [lib]
 doctest = false
@@ -11,13 +13,14 @@ bench = false
 [dependencies]
 typst = { path = ".." }
 typst-library = { path = "../library" }
-unscanny = "0.1"
-include_dir = "0.7"
-pulldown-cmark = "0.9"
-comemo = { git = "https://github.com/typst/comemo" }
-serde = "1"
-serde_yaml = "0.8"
+comemo = "0.3"
 heck = "0.4"
-yaml-front-matter = "0.1"
-unicode_names2 = "0.6.0"
+include_dir = "0.7"
 once_cell = "1"
+pulldown-cmark = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.8"
+typed-arena = "2"
+unicode_names2 = "0.6.0"
+unscanny = "0.1"
+yaml-front-matter = "0.1"

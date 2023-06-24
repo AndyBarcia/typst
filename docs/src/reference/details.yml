@@ -31,13 +31,15 @@ math: |
 
   ```example
   $ A = pi r^2 $
-  $ "area" = pi dot.op "radius"^2 $
+  $ "area" = pi dot "radius"^2 $
   $ cal(A) :=
       { x in RR | x "is natural" } $
+  #let x = 5
+  $ #x < 17 $
   ```
 
   Math mode makes a wide selection of [symbols]($category/symbols/sym) like
-  `pi`, `dot.op`, or `RR` available. Many mathematical symbols are available in
+  `pi`, `dot`, or `RR` available. Many mathematical symbols are available in
   different variants. You can select between different variants by applying
   [modifiers]($type/symbol) to the symbol. Typst further recognizes a number of
   shorthand sequences like `=>` that approximate a symbol. When such a shorthand
@@ -83,6 +85,16 @@ math: |
   Functions calls preceded by a hashtag are normal code function calls and not
   affected by these rules.
 
+  All math functions are part of the `math` [module]($scripting/#modules), which
+  is available by default in equations. Outside of equations, they can be
+  accessed with the `math.` prefix. For example, to set the font used for
+  equations, write:
+
+  ```example
+  #show math.equation: set text(font: "Fira Math")
+  $ sum_(i in NN) 1 + i $
+  ```
+
 layout: |
   Arranging elements on the page in different ways.
 
@@ -122,6 +134,7 @@ sym: |
   prefix.
 
   The `d` in an integral's `dx` can be written as `[$dif x$]`.
+  Outside math formulas, `dif` can be accessed as `math.dif`.
 
 emoji: |
   Named emoji.
@@ -146,7 +159,7 @@ construct: |
 data-loading: |
   Data loading from external files.
 
-  These functions help you with embedding data from experiments and APIs in your
+  These functions help you with embedding data from experiments in your
   documents.
 
 utility: |

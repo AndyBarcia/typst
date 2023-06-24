@@ -2,14 +2,11 @@ use std::any::TypeId;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::{Hash, Hasher};
 
-use ecow::EcoString;
 use once_cell::sync::Lazy;
 
 use super::{Content, Selector, Styles};
 use crate::diag::SourceResult;
-use crate::eval::{
-    cast_from_value, cast_to_value, Args, Dict, Func, FuncInfo, Value, Vm,
-};
+use crate::eval::{cast, Args, Dict, Func, FuncInfo, Value, Vm};
 
 /// A document element.
 pub trait Element: Construct + Set + Sized + 'static {
@@ -63,6 +60,14 @@ impl ElemFunc {
         (self.0.construct)(vm, args)
     }
 
+    /// Whether the contained element has the given capability.
+    pub fn can<C>(&self) -> bool
+    where
+        C: ?Sized + 'static,
+    {
+        (self.0.vtable)(TypeId::of::<C>()).is_some()
+    }
+
     /// Create a selector for elements of this function.
     pub fn select(self) -> Selector {
         Selector::Elem(self, None)
@@ -102,13 +107,10 @@ impl Hash for ElemFunc {
     }
 }
 
-cast_from_value! {
+cast! {
     ElemFunc,
+    self => Value::Func(self.into()),
     v: Func => v.element().ok_or("expected element function")?,
-}
-
-cast_to_value! {
-    v: ElemFunc => Value::Func(v.into())
 }
 
 impl From<&'static NativeElemFunc> for ElemFunc {
@@ -130,16 +132,3 @@ pub struct NativeElemFunc {
     /// Details about the function.
     pub info: Lazy<FuncInfo>,
 }
-
-/// A label for an element.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct Label(pub EcoString);
-
-impl Debug for Label {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "<{}>", self.0)
-    }
-}
-
-/// Indicates that an element cannot be labelled.
-pub trait Unlabellable {}

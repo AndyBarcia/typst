@@ -2,16 +2,15 @@ use super::*;
 
 const FRAC_AROUND: Em = Em::new(0.1);
 
-/// # Fraction
 /// A mathematical fraction.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ 1/2 < (x+1)/2 $
 /// $ ((x+1)) / 2 = frac(a, b) $
 /// ```
 ///
-/// ## Syntax
+/// ## Syntax { #syntax }
 /// This function also has dedicated syntax: Use a slash to turn neighbouring
 /// expressions into a fraction. Multiple atoms can be grouped into a single
 /// expression using round grouping parenthesis. Such parentheses are removed
@@ -31,6 +30,7 @@ pub struct FracElem {
 }
 
 impl LayoutMath for FracElem {
+    #[tracing::instrument(skip(ctx))]
     fn layout_math(&self, ctx: &mut MathContext) -> SourceResult<()> {
         layout(ctx, &self.num(), &self.denom(), false, self.span())
     }
@@ -38,7 +38,7 @@ impl LayoutMath for FracElem {
 
 /// A binomial expression.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// $ binom(n, k) $
 /// ```
@@ -136,6 +136,7 @@ fn layout(
                 Geometry::Line(Point::with_x(line_width)).stroked(Stroke {
                     paint: TextElem::fill_in(ctx.styles()),
                     thickness,
+                    ..Stroke::default()
                 }),
                 span,
             ),

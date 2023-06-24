@@ -2,7 +2,7 @@ use std::fmt::{self, Debug, Formatter};
 
 use ecow::{eco_format, EcoVec};
 
-use super::{Array, Cast, Dict, Str, Value};
+use super::{Array, Dict, FromValue, IntoValue, Str, Value};
 use crate::diag::{bail, At, SourceResult};
 use crate::syntax::{Span, Spanned};
 use crate::util::pretty_array_like;
@@ -29,10 +29,14 @@ pub struct Arg {
 
 impl Args {
     /// Create positional arguments from a span and values.
-    pub fn new(span: Span, values: impl IntoIterator<Item = Value>) -> Self {
+    pub fn new<T: IntoValue>(span: Span, values: impl IntoIterator<Item = T>) -> Self {
         let items = values
             .into_iter()
-            .map(|value| Arg { span, name: None, value: Spanned::new(value, span) })
+            .map(|value| Arg {
+                span,
+                name: None,
+                value: Spanned::new(value.into_value(), span),
+            })
             .collect();
         Self { span, items }
     }
@@ -49,16 +53,36 @@ impl Args {
     /// Consume and cast the first positional argument if there is one.
     pub fn eat<T>(&mut self) -> SourceResult<Option<T>>
     where
-        T: Cast<Spanned<Value>>,
+        T: FromValue<Spanned<Value>>,
     {
         for (i, slot) in self.items.iter().enumerate() {
             if slot.name.is_none() {
                 let value = self.items.remove(i).value;
                 let span = value.span;
-                return T::cast(value).at(span).map(Some);
+                return T::from_value(value).at(span).map(Some);
             }
         }
         Ok(None)
+    }
+
+    /// Consume n positional arguments if possible.
+    pub fn consume(&mut self, n: usize) -> SourceResult<Vec<Arg>> {
+        let mut list = vec![];
+
+        let mut i = 0;
+        while i < self.items.len() && list.len() < n {
+            if self.items[i].name.is_none() {
+                list.push(self.items.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+
+        if list.len() < n {
+            bail!(self.span, "not enough arguments");
+        }
+
+        Ok(list)
     }
 
     /// Consume and cast the first positional argument.
@@ -67,24 +91,24 @@ impl Args {
     /// left.
     pub fn expect<T>(&mut self, what: &str) -> SourceResult<T>
     where
-        T: Cast<Spanned<Value>>,
+        T: FromValue<Spanned<Value>>,
     {
         match self.eat()? {
             Some(v) => Ok(v),
-            None => bail!(self.span, "missing argument: {}", what),
+            None => bail!(self.span, "missing argument: {what}"),
         }
     }
 
     /// Find and consume the first castable positional argument.
     pub fn find<T>(&mut self) -> SourceResult<Option<T>>
     where
-        T: Cast<Spanned<Value>>,
+        T: FromValue<Spanned<Value>>,
     {
         for (i, slot) in self.items.iter().enumerate() {
-            if slot.name.is_none() && T::is(&slot.value) {
+            if slot.name.is_none() && T::castable(&slot.value.v) {
                 let value = self.items.remove(i).value;
                 let span = value.span;
-                return T::cast(value).at(span).map(Some);
+                return T::from_value(value).at(span).map(Some);
             }
         }
         Ok(None)
@@ -93,7 +117,7 @@ impl Args {
     /// Find and consume all castable positional arguments.
     pub fn all<T>(&mut self) -> SourceResult<Vec<T>>
     where
-        T: Cast<Spanned<Value>>,
+        T: FromValue<Spanned<Value>>,
     {
         let mut list = vec![];
         while let Some(value) = self.find()? {
@@ -106,7 +130,7 @@ impl Args {
     /// error if the conversion fails.
     pub fn named<T>(&mut self, name: &str) -> SourceResult<Option<T>>
     where
-        T: Cast<Spanned<Value>>,
+        T: FromValue<Spanned<Value>>,
     {
         // We don't quit once we have a match because when multiple matches
         // exist, we want to remove all of them and use the last one.
@@ -116,7 +140,7 @@ impl Args {
             if self.items[i].name.as_deref() == Some(name) {
                 let value = self.items.remove(i).value;
                 let span = value.span;
-                found = Some(T::cast(value).at(span)?);
+                found = Some(T::from_value(value).at(span)?);
             } else {
                 i += 1;
             }
@@ -127,7 +151,7 @@ impl Args {
     /// Same as named, but with fallback to find.
     pub fn named_or_find<T>(&mut self, name: &str) -> SourceResult<Option<T>>
     where
-        T: Cast<Spanned<Value>>,
+        T: FromValue<Spanned<Value>>,
     {
         match self.named(name)? {
             Some(value) => Ok(Some(value)),
@@ -147,7 +171,10 @@ impl Args {
     /// argument.
     pub fn finish(self) -> SourceResult<()> {
         if let Some(arg) = self.items.first() {
-            bail!(arg.span, "unexpected argument");
+            match &arg.name {
+                Some(name) => bail!(arg.span, "unexpected argument: {name}"),
+                _ => bail!(arg.span, "unexpected argument"),
+            }
         }
         Ok(())
     }

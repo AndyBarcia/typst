@@ -1,72 +1,149 @@
 //! Image handling.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::fmt::{self, Debug, Formatter};
 use std::io;
 use std::sync::Arc;
 
+use comemo::{Prehashed, Track, Tracked};
+use ecow::{EcoString, EcoVec};
+use image::codecs::gif::GifDecoder;
+use image::codecs::jpeg::JpegDecoder;
+use image::codecs::png::PngDecoder;
+use image::io::Limits;
+use image::{ImageDecoder, ImageResult};
+use usvg::{TreeParsing, TreeTextToPath};
+
 use crate::diag::{format_xml_like_error, StrResult};
+use crate::font::Font;
+use crate::geom::Axes;
 use crate::util::Buffer;
+use crate::World;
 
 /// A raster or vector image.
 ///
 /// Values of this type are cheap to clone and hash.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub struct Image {
+#[derive(Clone, Hash, Eq, PartialEq)]
+pub struct Image(Arc<Prehashed<Repr>>);
+
+/// The internal representation.
+#[derive(Hash)]
+struct Repr {
     /// The raw, undecoded image data.
     data: Buffer,
     /// The format of the encoded `buffer`.
     format: ImageFormat,
-    /// The width in pixels.
-    width: u32,
-    /// The height in pixels.
-    height: u32,
+    /// The size of the image.
+    size: Axes<u32>,
+    /// A loader for fonts referenced by an image (currently, only applies to
+    /// SVG).
+    loader: PreparedLoader,
+    /// A text describing the image.
+    alt: Option<EcoString>,
 }
 
 impl Image {
     /// Create an image from a buffer and a format.
-    ///
-    /// Extracts the width and height.
-    pub fn new(data: Buffer, format: ImageFormat) -> StrResult<Self> {
-        let (width, height) = determine_size(&data, format)?;
-        Ok(Self { data, format, width, height })
+    #[comemo::memoize]
+    pub fn new(
+        data: Buffer,
+        format: ImageFormat,
+        alt: Option<EcoString>,
+    ) -> StrResult<Self> {
+        let loader = PreparedLoader::default();
+        let decoded = match format {
+            ImageFormat::Raster(format) => decode_raster(&data, format)?,
+            ImageFormat::Vector(VectorFormat::Svg) => {
+                decode_svg(&data, (&loader as &dyn SvgFontLoader).track())?
+            }
+        };
+
+        Ok(Self(Arc::new(Prehashed::new(Repr {
+            data,
+            format,
+            size: decoded.size(),
+            loader,
+            alt,
+        }))))
+    }
+
+    /// Create a font-dependant image from a buffer and a format.
+    #[comemo::memoize]
+    pub fn with_fonts(
+        data: Buffer,
+        format: ImageFormat,
+        world: Tracked<dyn World + '_>,
+        fallback_family: Option<&str>,
+        alt: Option<EcoString>,
+    ) -> StrResult<Self> {
+        let loader = WorldLoader::new(world, fallback_family);
+        let decoded = match format {
+            ImageFormat::Raster(format) => decode_raster(&data, format)?,
+            ImageFormat::Vector(VectorFormat::Svg) => {
+                decode_svg(&data, (&loader as &dyn SvgFontLoader).track())?
+            }
+        };
+
+        Ok(Self(Arc::new(Prehashed::new(Repr {
+            data,
+            format,
+            size: decoded.size(),
+            loader: loader.into_prepared(),
+            alt,
+        }))))
     }
 
     /// The raw image data.
     pub fn data(&self) -> &Buffer {
-        &self.data
+        &self.0.data
     }
 
     /// The format of the image.
     pub fn format(&self) -> ImageFormat {
-        self.format
+        self.0.format
+    }
+
+    /// The size of the image in pixels.
+    pub fn size(&self) -> Axes<u32> {
+        self.0.size
     }
 
     /// The width of the image in pixels.
     pub fn width(&self) -> u32 {
-        self.width
+        self.size().x
     }
 
     /// The height of the image in pixels.
     pub fn height(&self) -> u32 {
-        self.height
+        self.size().y
     }
 
-    /// Decode the image.
-    #[comemo::memoize]
-    pub fn decode(&self) -> StrResult<Arc<DecodedImage>> {
-        Ok(Arc::new(match self.format {
+    /// A text describing the image.
+    pub fn alt(&self) -> Option<&str> {
+        self.0.alt.as_deref()
+    }
+
+    /// The decoded version of the image.
+    pub fn decoded(&self) -> Arc<DecodedImage> {
+        match self.format() {
+            ImageFormat::Raster(format) => decode_raster(self.data(), format),
             ImageFormat::Vector(VectorFormat::Svg) => {
-                let opts = usvg::Options::default();
-                let tree = usvg::Tree::from_data(&self.data, &opts.to_ref())
-                    .map_err(format_usvg_error)?;
-                DecodedImage::Svg(tree)
+                decode_svg(self.data(), (&self.0.loader as &dyn SvgFontLoader).track())
             }
-            ImageFormat::Raster(format) => {
-                let cursor = io::Cursor::new(&self.data);
-                let reader = image::io::Reader::with_format(cursor, format.into());
-                let dynamic = reader.decode().map_err(format_image_error)?;
-                DecodedImage::Raster(dynamic, format)
-            }
-        }))
+        }
+        .unwrap()
+    }
+}
+
+impl Debug for Image {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.debug_struct("Image")
+            .field("format", &self.format())
+            .field("width", &self.width())
+            .field("height", &self.height())
+            .field("alt", &self.alt())
+            .finish()
     }
 }
 
@@ -123,36 +200,235 @@ impl From<ttf_parser::RasterImageFormat> for ImageFormat {
 
 /// A decoded image.
 pub enum DecodedImage {
-    /// A decoded pixel raster.
-    Raster(image::DynamicImage, RasterFormat),
+    /// A decoded pixel raster with its ICC profile.
+    Raster(image::DynamicImage, Option<IccProfile>, RasterFormat),
     /// An decoded SVG tree.
     Svg(usvg::Tree),
 }
 
-/// Determine the image size in pixels.
-#[comemo::memoize]
-fn determine_size(data: &Buffer, format: ImageFormat) -> StrResult<(u32, u32)> {
-    match format {
-        ImageFormat::Raster(format) => {
-            let cursor = io::Cursor::new(&data);
-            let reader = image::io::Reader::with_format(cursor, format.into());
-            Ok(reader.into_dimensions().map_err(format_image_error)?)
-        }
-        ImageFormat::Vector(VectorFormat::Svg) => {
-            let opts = usvg::Options::default();
-            let tree =
-                usvg::Tree::from_data(data, &opts.to_ref()).map_err(format_usvg_error)?;
+impl DecodedImage {
+    /// The size of the image in pixels.
+    pub fn size(&self) -> Axes<u32> {
+        Axes::new(self.width(), self.height())
+    }
 
-            let size = tree.svg_node().size;
-            let width = size.width().ceil() as u32;
-            let height = size.height().ceil() as u32;
-            Ok((width, height))
+    /// The width of the image in pixels.
+    pub fn width(&self) -> u32 {
+        match self {
+            Self::Raster(dynamic, _, _) => dynamic.width(),
+            Self::Svg(tree) => tree.size.width().ceil() as u32,
+        }
+    }
+
+    /// The height of the image in pixels.
+    pub fn height(&self) -> u32 {
+        match self {
+            Self::Raster(dynamic, _, _) => dynamic.height(),
+            Self::Svg(tree) => tree.size.height().ceil() as u32,
         }
     }
 }
 
+/// Raw data for of an ICC profile.
+pub struct IccProfile(pub Vec<u8>);
+
+/// Decode a raster image.
+#[comemo::memoize]
+fn decode_raster(data: &Buffer, format: RasterFormat) -> StrResult<Arc<DecodedImage>> {
+    fn decode_with<'a, T: ImageDecoder<'a>>(
+        decoder: ImageResult<T>,
+    ) -> ImageResult<(image::DynamicImage, Option<IccProfile>)> {
+        let mut decoder = decoder?;
+        let icc = decoder.icc_profile().filter(|data| !data.is_empty()).map(IccProfile);
+        decoder.set_limits(Limits::default())?;
+        let dynamic = image::DynamicImage::from_decoder(decoder)?;
+        Ok((dynamic, icc))
+    }
+
+    let cursor = io::Cursor::new(data);
+    let (dynamic, icc) = match format {
+        RasterFormat::Jpg => decode_with(JpegDecoder::new(cursor)),
+        RasterFormat::Png => decode_with(PngDecoder::new(cursor)),
+        RasterFormat::Gif => decode_with(GifDecoder::new(cursor)),
+    }
+    .map_err(format_image_error)?;
+
+    Ok(Arc::new(DecodedImage::Raster(dynamic, icc, format)))
+}
+
+/// Decode an SVG image.
+#[comemo::memoize]
+fn decode_svg(
+    data: &Buffer,
+    loader: Tracked<dyn SvgFontLoader + '_>,
+) -> StrResult<Arc<DecodedImage>> {
+    // Disable usvg's default to "Times New Roman". Instead, we default to
+    // the empty family and later, when we traverse the SVG, we check for
+    // empty and non-existing family names and replace them with the true
+    // fallback family. This way, we can memoize SVG decoding with and without
+    // fonts if the SVG does not contain text.
+    let opts = usvg::Options { font_family: String::new(), ..Default::default() };
+    let mut tree = usvg::Tree::from_data(data, &opts).map_err(format_usvg_error)?;
+    if tree.has_text_nodes() {
+        let fontdb = load_svg_fonts(&tree, loader);
+        tree.convert_text(&fontdb);
+    }
+    Ok(Arc::new(DecodedImage::Svg(tree)))
+}
+
+/// Discover and load the fonts referenced by an SVG.
+fn load_svg_fonts(
+    tree: &usvg::Tree,
+    loader: Tracked<dyn SvgFontLoader + '_>,
+) -> fontdb::Database {
+    let mut referenced = BTreeMap::<EcoString, bool>::new();
+    let mut fontdb = fontdb::Database::new();
+    let mut load = |family_cased: &str| {
+        let family = EcoString::from(family_cased.trim()).to_lowercase();
+        if let Some(&success) = referenced.get(&family) {
+            return success;
+        }
+
+        // We load all variants for the family, since we don't know which will
+        // be used.
+        let mut success = false;
+        for font in loader.load(&family) {
+            let source = Arc::new(font.data().clone());
+            fontdb.load_font_source(fontdb::Source::Binary(source));
+            success = true;
+        }
+
+        referenced.insert(family, success);
+        success
+    };
+
+    // Load fallback family.
+    let fallback_cased = loader.fallback();
+    if let Some(family_cased) = fallback_cased {
+        load(family_cased);
+    }
+
+    // Find out which font families are referenced by the SVG.
+    traverse_svg(&tree.root, &mut |node| {
+        let usvg::NodeKind::Text(text) = &mut *node.borrow_mut() else { return };
+        for chunk in &mut text.chunks {
+            for span in &mut chunk.spans {
+                for family_cased in &mut span.font.families {
+                    if family_cased.is_empty() || !load(family_cased) {
+                        let Some(fallback) = fallback_cased else { continue };
+                        *family_cased = fallback.into();
+                    }
+                }
+            }
+        }
+    });
+
+    fontdb
+}
+
+/// Search for all font families referenced by an SVG.
+fn traverse_svg<F>(node: &usvg::Node, f: &mut F)
+where
+    F: FnMut(&usvg::Node),
+{
+    f(node);
+    for child in node.children() {
+        traverse_svg(&child, f);
+    }
+}
+
+/// Interface for loading fonts for an SVG.
+///
+/// Can be backed by a `WorldLoader` or a `PreparedLoader`. The first is used
+/// when the image is initially decoded. It records all required fonts and
+/// produces a `PreparedLoader` from it. This loader can then be used to
+/// redecode the image with a cache hit from the initial decoding. This way, we
+/// can cheaply access the decoded version of an image.
+///
+/// The alternative would be to store the decoded image directly in the image,
+/// but that would make `Image` not `Send` because `usvg::Tree` is not `Send`.
+/// The current design also has the added benefit that large decoded images can
+/// be evicted if they are not used anymore.
+#[comemo::track]
+trait SvgFontLoader {
+    /// Load all fonts for the given lowercased font family.
+    fn load(&self, lower_family: &str) -> EcoVec<Font>;
+
+    /// The case-sensitive name of the fallback family.
+    fn fallback(&self) -> Option<&str>;
+}
+
+/// Loads fonts for an SVG from a world
+struct WorldLoader<'a> {
+    world: Tracked<'a, dyn World + 'a>,
+    seen: RefCell<BTreeMap<EcoString, EcoVec<Font>>>,
+    fallback_family_cased: Option<String>,
+}
+
+impl<'a> WorldLoader<'a> {
+    fn new(world: Tracked<'a, dyn World + 'a>, fallback_family: Option<&str>) -> Self {
+        // Recover the non-lowercased version of the family because
+        // usvg is case sensitive.
+        let book = world.book();
+        let fallback_family_cased = fallback_family
+            .and_then(|lowercase| book.select_family(lowercase).next())
+            .and_then(|index| book.info(index))
+            .map(|info| info.family.clone());
+
+        Self {
+            world,
+            fallback_family_cased,
+            seen: Default::default(),
+        }
+    }
+
+    fn into_prepared(self) -> PreparedLoader {
+        PreparedLoader {
+            families: self.seen.into_inner(),
+            fallback_family_cased: self.fallback_family_cased,
+        }
+    }
+}
+
+impl SvgFontLoader for WorldLoader<'_> {
+    fn load(&self, family: &str) -> EcoVec<Font> {
+        self.seen
+            .borrow_mut()
+            .entry(family.into())
+            .or_insert_with(|| {
+                self.world
+                    .book()
+                    .select_family(family)
+                    .filter_map(|id| self.world.font(id))
+                    .collect()
+            })
+            .clone()
+    }
+
+    fn fallback(&self) -> Option<&str> {
+        self.fallback_family_cased.as_deref()
+    }
+}
+
+/// Loads fonts for an SVG from a prepared list.
+#[derive(Default, Hash)]
+struct PreparedLoader {
+    families: BTreeMap<EcoString, EcoVec<Font>>,
+    fallback_family_cased: Option<String>,
+}
+
+impl SvgFontLoader for PreparedLoader {
+    fn load(&self, family: &str) -> EcoVec<Font> {
+        self.families.get(family).cloned().unwrap_or_default()
+    }
+
+    fn fallback(&self) -> Option<&str> {
+        self.fallback_family_cased.as_deref()
+    }
+}
+
 /// Format the user-facing raster graphic decoding error message.
-fn format_image_error(error: image::ImageError) -> String {
+fn format_image_error(error: image::ImageError) -> EcoString {
     match error {
         image::ImageError::Limits(_) => "file is too large".into(),
         _ => "failed to decode image".into(),
@@ -160,7 +436,7 @@ fn format_image_error(error: image::ImageError) -> String {
 }
 
 /// Format the user-facing SVG decoding error message.
-fn format_usvg_error(error: usvg::Error) -> String {
+fn format_usvg_error(error: usvg::Error) -> EcoString {
     match error {
         usvg::Error::NotAnUtf8Str => "file is not valid utf-8".into(),
         usvg::Error::MalformedGZip => "file is not compressed correctly".into(),

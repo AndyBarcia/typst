@@ -38,6 +38,10 @@ The keyword ```rust let```.
 (``` trimmed```) \
 
 ---
+// Single ticks should not have a language.
+`rust let`
+
+---
 // First line is not dedented and leading space is still possible.
      ```   A
         B
@@ -51,5 +55,5 @@ The keyword ```rust let```.
 
 ---
 // Unterminated.
-// Error: 2:1 expected 1 backtick
+// Error: 1-2:1 unclosed raw text
 `endless

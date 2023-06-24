@@ -1,12 +1,12 @@
 use super::{AlignElem, Spacing};
 use crate::prelude::*;
 
-/// Arrange content and spacing horizontally or vertically.
+/// Arranges content and spacing horizontally or vertically.
 ///
 /// The stack places a list of items along an axis, with optional spacing
 /// between each item.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// #stack(
 ///   dir: ttb,
@@ -32,12 +32,13 @@ pub struct StackElem {
     /// Spacing to insert between items where no explicit spacing was provided.
     pub spacing: Option<Spacing>,
 
-    /// The childfren to stack along the axis.
+    /// The children to stack along the axis.
     #[variadic]
     pub children: Vec<StackChild>,
 }
 
 impl Layout for StackElem {
+    #[tracing::instrument(name = "StackElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -89,17 +90,14 @@ impl Debug for StackChild {
     }
 }
 
-cast_from_value! {
+cast! {
     StackChild,
+    self => match self {
+        Self::Spacing(spacing) => spacing.into_value(),
+        Self::Block(content) => content.into_value(),
+    },
     v: Spacing => Self::Spacing(v),
     v: Content => Self::Block(v),
-}
-
-cast_to_value! {
-    v: StackChild => match v {
-        StackChild::Spacing(spacing) => spacing.into(),
-        StackChild::Block(content) => content.into(),
-    }
 }
 
 /// Performs stack layout.
@@ -161,6 +159,7 @@ impl<'a> StackLayouter<'a> {
     }
 
     /// Add spacing along the spacing direction.
+    #[tracing::instrument(name = "StackLayouter::layout_spacing", skip_all)]
     fn layout_spacing(&mut self, spacing: Spacing) {
         match spacing {
             Spacing::Rel(v) => {
@@ -184,6 +183,7 @@ impl<'a> StackLayouter<'a> {
     }
 
     /// Layout an arbitrary block.
+    #[tracing::instrument(name = "StackLayouter::layout_block", skip_all)]
     fn layout_block(
         &mut self,
         vt: &mut Vt,
@@ -198,7 +198,7 @@ impl<'a> StackLayouter<'a> {
         let aligns = if let Some(align) = block.to::<AlignElem>() {
             align.alignment(styles)
         } else if let Some((_, local)) = block.to_styled() {
-            AlignElem::alignment_in(styles.chain(&local))
+            AlignElem::alignment_in(styles.chain(local))
         } else {
             AlignElem::alignment_in(styles)
         }
@@ -237,7 +237,7 @@ impl<'a> StackLayouter<'a> {
         // the region expands.
         let mut size = self
             .expand
-            .select(self.initial, self.used.to_axes(self.axis))
+            .select(self.initial, self.used.into_axes(self.axis))
             .min(self.initial);
 
         // Expand fully if there are fr spacings.
@@ -318,7 +318,7 @@ impl<T> Gen<T> {
     }
 
     /// Convert to the specific representation, given the current main axis.
-    fn to_axes(self, main: Axis) -> Axes<T> {
+    fn into_axes(self, main: Axis) -> Axes<T> {
         match main {
             Axis::X => Axes::new(self.main, self.cross),
             Axis::Y => Axes::new(self.cross, self.main),
@@ -334,6 +334,6 @@ impl Gen<Abs> {
 
     /// Convert to a point.
     fn to_point(self, main: Axis) -> Point {
-        self.to_axes(main).to_point()
+        self.into_axes(main).to_point()
     }
 }

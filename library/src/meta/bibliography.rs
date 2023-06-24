@@ -7,10 +7,11 @@ use ecow::{eco_vec, EcoVec};
 use hayagriva::io::{BibLaTeXError, YamlBibliographyError};
 use hayagriva::style::{self, Brackets, Citation, Database, DisplayString, Formatting};
 use hayagriva::Entry;
+use typst::util::option_eq;
 
-use super::{LocalName, RefElem};
+use super::{LinkElem, LocalName, RefElem};
 use crate::layout::{BlockElem, GridElem, ParElem, Sizing, TrackSizings, VElem};
-use crate::meta::HeadingElem;
+use crate::meta::{FootnoteElem, HeadingElem};
 use crate::prelude::*;
 use crate::text::TextElem;
 
@@ -43,18 +44,22 @@ use crate::text::TextElem;
 ///
 /// Display: Bibliography
 /// Category: meta
-#[element(Locatable, Synthesize, Show, LocalName)]
+#[element(Locatable, Synthesize, Show, Finalize, LocalName)]
 pub struct BibliographyElem {
     /// Path to a Hayagriva `.yml` or BibLaTeX `.bib` file.
     #[required]
     #[parse(
-        let Spanned { v: path, span } =
-            args.expect::<Spanned<EcoString>>("path to bibliography file")?;
-        let path: EcoString = vm.locate(&path).at(span)?.to_string_lossy().into();
-        let _ = load(vm.world(), &path).at(span)?;
-        path
+        let Spanned { v: mut paths, span } =
+            args.expect::<Spanned<BibPaths>>("path to bibliography file")?;
+        for path in &mut paths.0 {
+            // resolve paths
+            *path = vm.locate(path).at(span)?.to_string_lossy().into();
+        }
+        // check that parsing works
+        let _ = load(vm.world(), &paths).at(span)?;
+        paths
     )]
-    pub path: EcoString,
+    pub path: BibPaths,
 
     /// The title of the bibliography.
     ///
@@ -62,6 +67,11 @@ pub struct BibliographyElem {
     ///   language]($func/text.lang) will be used. This is the default.
     /// - When set to `{none}`, the bibliography will not have a title.
     /// - A custom title can be set by passing content.
+    ///
+    /// The bibliography's heading will not be numbered by default, but you can
+    /// force it to be with a show-set rule:
+    /// `{show bibliography: set heading(numbering: "1.")}`
+    /// ```
     #[default(Some(Smart::Auto))]
     pub title: Option<Smart<Content>>,
 
@@ -70,16 +80,27 @@ pub struct BibliographyElem {
     pub style: BibliographyStyle,
 }
 
+/// A list of bib file paths.
+#[derive(Debug, Default, Clone, Hash)]
+pub struct BibPaths(Vec<EcoString>);
+
+cast! {
+    BibPaths,
+    self => self.0.into_value(),
+    v: EcoString => Self(vec![v]),
+    v: Array => Self(v.into_iter().map(Value::cast).collect::<StrResult<_>>()?),
+}
+
 impl BibliographyElem {
     /// Find the document's bibliography.
     pub fn find(introspector: Tracked<Introspector>) -> StrResult<Self> {
-        let mut iter = introspector.query(Self::func().select()).into_iter();
+        let mut iter = introspector.query(&Self::func().select()).into_iter();
         let Some(elem) = iter.next() else {
-            return Err("the document does not contain a bibliography".into());
+            bail!("the document does not contain a bibliography");
         };
 
         if iter.next().is_some() {
-            Err("multiple bibliographies are not supported")?;
+            bail!("multiple bibliographies are not supported");
         }
 
         Ok(elem.to::<Self>().unwrap().clone())
@@ -88,7 +109,7 @@ impl BibliographyElem {
     /// Whether the bibliography contains the given key.
     pub fn has(vt: &Vt, key: &str) -> bool {
         vt.introspector
-            .query(Self::func().select())
+            .query(&Self::func().select())
             .into_iter()
             .flat_map(|elem| load(vt.world, &elem.to::<Self>().unwrap().path()))
             .flatten()
@@ -97,7 +118,7 @@ impl BibliographyElem {
 
     /// Find all bibliography keys.
     pub fn keys(
-        world: Tracked<dyn World>,
+        world: Tracked<dyn World + '_>,
         introspector: Tracked<Introspector>,
     ) -> Vec<(EcoString, Option<EcoString>)> {
         Self::find(introspector)
@@ -115,74 +136,100 @@ impl BibliographyElem {
 }
 
 impl Synthesize for BibliographyElem {
-    fn synthesize(&mut self, styles: StyleChain) {
+    fn synthesize(&mut self, _vt: &mut Vt, styles: StyleChain) -> SourceResult<()> {
         self.push_style(self.style(styles));
+        Ok(())
     }
 }
 
 impl Show for BibliographyElem {
+    #[tracing::instrument(name = "BibliographyElem::show", skip_all)]
     fn show(&self, vt: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
         const COLUMN_GUTTER: Em = Em::new(0.65);
         const INDENT: Em = Em::new(1.5);
 
         let mut seq = vec![];
         if let Some(title) = self.title(styles) {
-            let title = title.clone().unwrap_or_else(|| {
-                TextElem::packed(self.local_name(TextElem::lang_in(styles)))
+            let title =
+                title.unwrap_or_else(|| {
+                    TextElem::packed(self.local_name(
+                        TextElem::lang_in(styles),
+                        TextElem::region_in(styles),
+                    ))
                     .spanned(self.span())
-            });
+                });
 
-            seq.push(
-                HeadingElem::new(title)
-                    .with_level(NonZeroUsize::ONE)
-                    .with_numbering(None)
-                    .pack(),
-            );
+            seq.push(HeadingElem::new(title).with_level(NonZeroUsize::ONE).pack());
         }
 
-        if !vt.introspector.init() {
-            return Ok(Content::sequence(seq));
-        }
+        Ok(vt.delayed(|vt| {
+            let works = Works::new(vt).at(self.span())?;
 
-        let works = Works::new(vt).at(self.span())?;
+            let row_gutter = BlockElem::below_in(styles).amount();
+            if works.references.iter().any(|(prefix, _)| prefix.is_some()) {
+                let mut cells = vec![];
+                for (prefix, reference) in &works.references {
+                    cells.push(prefix.clone().unwrap_or_default());
+                    cells.push(reference.clone());
+                }
 
-        let row_gutter = BlockElem::below_in(styles).amount();
-        if works.references.iter().any(|(prefix, _)| prefix.is_some()) {
-            let mut cells = vec![];
-            for (prefix, reference) in &works.references {
-                cells.push(prefix.clone().unwrap_or_default());
-                cells.push(reference.clone());
+                seq.push(VElem::new(row_gutter).with_weakness(3).pack());
+                seq.push(
+                    GridElem::new(cells)
+                        .with_columns(TrackSizings(vec![Sizing::Auto; 2]))
+                        .with_column_gutter(TrackSizings(vec![COLUMN_GUTTER.into()]))
+                        .with_row_gutter(TrackSizings(vec![row_gutter.into()]))
+                        .pack(),
+                );
+            } else {
+                let mut entries = vec![];
+                for (_, reference) in &works.references {
+                    entries.push(VElem::new(row_gutter).with_weakness(3).pack());
+                    entries.push(reference.clone());
+                }
+
+                seq.push(
+                    Content::sequence(entries)
+                        .styled(ParElem::set_hanging_indent(INDENT.into())),
+                );
             }
 
-            seq.push(VElem::new(row_gutter).with_weakness(3).pack());
-            seq.push(
-                GridElem::new(cells)
-                    .with_columns(TrackSizings(vec![Sizing::Auto; 2]))
-                    .with_column_gutter(TrackSizings(vec![COLUMN_GUTTER.into()]))
-                    .with_row_gutter(TrackSizings(vec![row_gutter.into()]))
-                    .pack(),
-            );
-        } else {
-            let mut entries = vec![];
-            for (_, reference) in &works.references {
-                entries.push(VElem::new(row_gutter).with_weakness(3).pack());
-                entries.push(reference.clone());
-            }
+            Ok(Content::sequence(seq))
+        }))
+    }
+}
 
-            seq.push(
-                Content::sequence(entries)
-                    .styled(ParElem::set_hanging_indent(INDENT.into())),
-            );
-        }
-
-        Ok(Content::sequence(seq))
+impl Finalize for BibliographyElem {
+    fn finalize(&self, realized: Content, _: StyleChain) -> Content {
+        realized.styled(HeadingElem::set_numbering(None))
     }
 }
 
 impl LocalName for BibliographyElem {
-    fn local_name(&self, lang: Lang) -> &'static str {
+    fn local_name(&self, lang: Lang, region: Option<Region>) -> &'static str {
         match lang {
+            Lang::ALBANIAN => "Bibliografi",
+            Lang::ARABIC => "المراجع",
+            Lang::BOKMÅL => "Bibliografi",
+            Lang::CHINESE if option_eq(region, "TW") => "書目",
+            Lang::CHINESE => "参考文献",
+            Lang::CZECH => "Bibliografie",
+            Lang::DANISH => "Bibliografi",
+            Lang::DUTCH => "Bibliografie",
+            Lang::FILIPINO => "Bibliograpiya",
+            Lang::FRENCH => "Bibliographie",
             Lang::GERMAN => "Bibliographie",
+            Lang::ITALIAN => "Bibliografia",
+            Lang::NYNORSK => "Bibliografi",
+            Lang::POLISH => "Bibliografia",
+            Lang::PORTUGUESE => "Bibliografia",
+            Lang::RUSSIAN => "Библиография",
+            Lang::SLOVENIAN => "Literatura",
+            Lang::SPANISH => "Bibliografía",
+            Lang::SWEDISH => "Bibliografi",
+            Lang::TURKISH => "Kaynakça",
+            Lang::UKRAINIAN => "Бібліографія",
+            Lang::VIETNAMESE => "Tài liệu tham khảo",
             Lang::ENGLISH | _ => "Bibliography",
         }
     }
@@ -196,7 +243,10 @@ pub enum BibliographyStyle {
     Apa,
     /// The Chicago Author Date style. Based on the 17th edition of the Chicago
     /// Manual of Style, Chapter 15.
-    AuthorDate,
+    ChicagoAuthorDate,
+    /// The Chicago Notes style. Based on the 17th edition of the Chicago
+    /// Manual of Style, Chapter 14.
+    ChicagoNotes,
     /// The style of the Institute of Electrical and Electronics Engineers.
     /// Based on the 2018 IEEE Reference Guide.
     Ieee,
@@ -209,10 +259,11 @@ impl BibliographyStyle {
     /// The default citation style for this bibliography style.
     pub fn default_citation_style(self) -> CitationStyle {
         match self {
-            Self::Apa => CitationStyle::AuthorDate,
-            Self::AuthorDate => CitationStyle::AuthorDate,
+            Self::Apa => CitationStyle::ChicagoAuthorDate,
+            Self::ChicagoAuthorDate => CitationStyle::ChicagoAuthorDate,
+            Self::ChicagoNotes => CitationStyle::ChicagoNotes,
             Self::Ieee => CitationStyle::Numerical,
-            Self::Mla => CitationStyle::AuthorDate,
+            Self::Mla => CitationStyle::ChicagoAuthorDate,
         }
     }
 }
@@ -272,7 +323,7 @@ pub struct CiteElem {
     ///
     /// #bibliography(
     ///   "works.bib",
-    ///   style: "author-date",
+    ///   style: "chicago-author-date",
     /// )
     /// ```
     #[default(true)]
@@ -294,32 +345,32 @@ pub struct CiteElem {
 }
 
 impl Synthesize for CiteElem {
-    fn synthesize(&mut self, styles: StyleChain) {
+    fn synthesize(&mut self, _vt: &mut Vt, styles: StyleChain) -> SourceResult<()> {
         self.push_supplement(self.supplement(styles));
         self.push_brackets(self.brackets(styles));
         self.push_style(self.style(styles));
+        Ok(())
     }
 }
 
 impl Show for CiteElem {
+    #[tracing::instrument(name = "CiteElem::show", skip(self, vt))]
     fn show(&self, vt: &mut Vt, _: StyleChain) -> SourceResult<Content> {
-        if !vt.introspector.init() {
-            return Ok(Content::empty());
-        }
-
-        let works = Works::new(vt).at(self.span())?;
-        let location = self.0.location().unwrap();
-        works
-            .citations
-            .get(&location)
-            .cloned()
-            .flatten()
-            .ok_or("bibliography does not contain this key")
-            .at(self.span())
+        Ok(vt.delayed(|vt| {
+            let works = Works::new(vt).at(self.span())?;
+            let location = self.0.location().unwrap();
+            works
+                .citations
+                .get(&location)
+                .cloned()
+                .flatten()
+                .ok_or("bibliography does not contain this key")
+                .at(self.span())
+        }))
     }
 }
 
-cast_from_value! {
+cast! {
     CiteElem,
     v: Content => v.to::<Self>().cloned().ok_or("expected citation")?,
 }
@@ -332,14 +383,17 @@ pub enum CitationStyle {
     /// A simple alphanumerical style. For example, the output could be Rass97
     /// or MKG+21.
     Alphanumerical,
-    /// The Chicago Author Date style. Based on the 17th edition of the Chicago
-    /// Manual of Style, Chapter 15.
-    AuthorDate,
-    /// A Chicago-like author-title format. Results could look like this:
-    /// Prokopov, “It Is Fast or It Is Wrong”.
-    AuthorTitle,
     /// Citations that just consist of the entry keys.
     Keys,
+    /// The Chicago Author Date style. Based on the 17th edition of the Chicago
+    /// Manual of Style, Chapter 15.
+    ChicagoAuthorDate,
+    /// The Chicago Notes style. Based on the 17th edition of the Chicago
+    /// Manual of Style, Chapter 14.
+    ChicagoNotes,
+    /// A Chicago-like author-title format. Results could look like this:
+    /// Prokopov, “It Is Fast or It Is Wrong”.
+    ChicagoAuthorTitle,
 }
 
 impl CitationStyle {
@@ -361,7 +415,7 @@ impl Works {
         let bibliography = BibliographyElem::find(vt.introspector)?;
         let citations = vt
             .introspector
-            .query(Selector::Any(eco_vec![
+            .query(&Selector::Or(eco_vec![
                 RefElem::func().select(),
                 CiteElem::func().select(),
             ]))
@@ -378,7 +432,7 @@ impl Works {
 /// Generate all citations and the whole bibliography.
 #[comemo::memoize]
 fn create(
-    world: Tracked<dyn World>,
+    world: Tracked<dyn World + '_>,
     bibliography: BibliographyElem,
     citations: Vec<CiteElem>,
 ) -> Arc<Works> {
@@ -436,10 +490,13 @@ fn create(
                     CitationStyle::Alphanumerical => {
                         Box::new(style::Alphanumerical::new())
                     }
-                    CitationStyle::AuthorDate => {
+                    CitationStyle::ChicagoAuthorDate => {
                         Box::new(style::ChicagoAuthorDate::new())
                     }
-                    CitationStyle::AuthorTitle => Box::new(style::AuthorTitle::new()),
+                    CitationStyle::ChicagoNotes => Box::new(style::ChicagoNotes::new()),
+                    CitationStyle::ChicagoAuthorTitle => {
+                        Box::new(style::AuthorTitle::new())
+                    }
                     CitationStyle::Keys => Box::new(style::Keys::new()),
                 };
             }
@@ -453,7 +510,7 @@ fn create(
                         &mut *citation_style,
                         &[Citation {
                             entry,
-                            supplement: supplement.is_some().then(|| SUPPLEMENT),
+                            supplement: supplement.is_some().then_some(SUPPLEMENT),
                         }],
                     )
                     .display;
@@ -487,13 +544,18 @@ fn create(
                 };
             }
 
+            if style == CitationStyle::ChicagoNotes {
+                content = FootnoteElem::new(content).pack();
+            }
+
             (location, Some(content))
         })
         .collect();
 
     let bibliography_style: Box<dyn style::BibliographyStyle> = match style {
         BibliographyStyle::Apa => Box::new(style::Apa::new()),
-        BibliographyStyle::AuthorDate => Box::new(style::ChicagoAuthorDate::new()),
+        BibliographyStyle::ChicagoAuthorDate => Box::new(style::ChicagoAuthorDate::new()),
+        BibliographyStyle::ChicagoNotes => Box::new(style::ChicagoNotes::new()),
         BibliographyStyle::Ieee => Box::new(style::Ieee::new()),
         BibliographyStyle::Mla => Box::new(style::Mla::new()),
     };
@@ -502,24 +564,18 @@ fn create(
         .bibliography(&*bibliography_style, None)
         .into_iter()
         .map(|reference| {
-            // Make link from citation to here work.
-            let backlink = {
-                let mut content = Content::empty();
-                content.set_location(ref_location(&reference.entry));
-                MetaElem::set_data(vec![Meta::Elem(content)])
-            };
-
+            let backlink = ref_location(reference.entry);
             let prefix = reference.prefix.map(|prefix| {
                 // Format and link to first citation.
                 let bracketed = prefix.with_default_brackets(&*citation_style);
                 format_display_string(&bracketed, None, span)
                     .linked(Destination::Location(ids[reference.entry.key()]))
-                    .styled(backlink.clone())
+                    .backlinked(backlink)
             });
 
             let mut reference = format_display_string(&reference.display, None, span);
             if prefix.is_none() {
-                reference = reference.styled(backlink);
+                reference = reference.backlinked(backlink);
             }
 
             (prefix, reference)
@@ -531,22 +587,55 @@ fn create(
 
 /// Load bibliography entries from a path.
 #[comemo::memoize]
-fn load(world: Tracked<dyn World>, path: &str) -> StrResult<EcoVec<hayagriva::Entry>> {
-    let path = Path::new(path);
-    let buffer = world.file(path)?;
-    let src = std::str::from_utf8(&buffer).map_err(|_| "file is not valid utf-8")?;
+fn load(
+    world: Tracked<dyn World + '_>,
+    paths: &BibPaths,
+) -> StrResult<EcoVec<hayagriva::Entry>> {
+    let mut result = EcoVec::new();
+
+    // We might have multiple bib/yaml files
+    for path in &paths.0 {
+        let buffer = world.file(Path::new(path.as_str()))?;
+        let src = std::str::from_utf8(&buffer).map_err(|_| "file is not valid utf-8")?;
+        let entries = parse_bib(path, src)?;
+        result.extend(entries);
+    }
+
+    // Biblatex only checks for duplicate keys within files
+    // -> We have to do this between files again
+    let mut keys = result.iter().map(|r| r.key()).collect::<Vec<_>>();
+    keys.sort_unstable();
+    // Waiting for `slice_partition_dedup` #54279
+    let mut duplicates = Vec::new();
+    for pair in keys.windows(2) {
+        if pair[0] == pair[1] {
+            duplicates.push(pair[0]);
+        }
+    }
+
+    if !duplicates.is_empty() {
+        Err(eco_format!("duplicate bibliography keys: {}", duplicates.join(", ")))
+    } else {
+        Ok(result)
+    }
+}
+
+/// Parse a bibliography file (bib/yml/yaml)
+fn parse_bib(path_str: &str, src: &str) -> StrResult<Vec<hayagriva::Entry>> {
+    let path = Path::new(path_str);
     let ext = path.extension().and_then(OsStr::to_str).unwrap_or_default();
-    let entries = match ext.to_lowercase().as_str() {
-        "yml" => hayagriva::io::from_yaml_str(src).map_err(format_hayagriva_error)?,
+    match ext.to_lowercase().as_str() {
+        "yml" | "yaml" => {
+            hayagriva::io::from_yaml_str(src).map_err(format_hayagriva_error)
+        }
         "bib" => hayagriva::io::from_biblatex_str(src).map_err(|err| {
             err.into_iter()
                 .next()
-                .map(|error| format_biblatex_error(src, error))
-                .unwrap_or_else(|| "failed to parse biblatex file".into())
-        })?,
-        _ => return Err("unknown bibliography format".into()),
-    };
-    Ok(entries.into_iter().collect())
+                .map(|error| format_biblatex_error(path_str, src, error))
+                .unwrap_or_else(|| eco_format!("failed to parse {path_str}"))
+        }),
+        _ => bail!("unknown bibliography format (must be .yml/.yaml or .bib)"),
+    }
 }
 
 /// Format a Hayagriva loading error.
@@ -555,13 +644,13 @@ fn format_hayagriva_error(error: YamlBibliographyError) -> EcoString {
 }
 
 /// Format a BibLaTeX loading error.
-fn format_biblatex_error(src: &str, error: BibLaTeXError) -> EcoString {
+fn format_biblatex_error(path: &str, src: &str, error: BibLaTeXError) -> EcoString {
     let (span, msg) = match error {
         BibLaTeXError::Parse(error) => (error.span, error.kind.to_string()),
         BibLaTeXError::Type(error) => (error.span, error.kind.to_string()),
     };
     let line = src.get(..span.start).unwrap_or_default().lines().count();
-    eco_format!("failed to parse biblatex file: {msg} in line {line}")
+    eco_format!("parsing failed at {path}:{line}: {msg}")
 }
 
 /// Hayagriva only supports strings, but we have a content supplement. To deal
@@ -613,7 +702,8 @@ fn format_display_string(
                 Formatting::Bold => content.strong(),
                 Formatting::Italic => content.emph(),
                 Formatting::Link(link) => {
-                    content.linked(Destination::Url(link.as_str().into()))
+                    LinkElem::new(Destination::Url(link.as_str().into()).into(), content)
+                        .pack()
                 }
             };
         }

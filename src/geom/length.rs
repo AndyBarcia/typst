@@ -1,6 +1,6 @@
 use super::*;
 
-/// A length, possibly expressed with contextual units.
+/// A size or distance, possibly expressed with contextual units.
 ///
 /// Currently supports absolute and font-relative units, but support could quite
 /// easily be extended to other units.
@@ -77,12 +77,6 @@ impl From<Abs> for Length {
 impl From<Em> for Length {
     fn from(em: Em) -> Self {
         Self { abs: Abs::zero(), em }
-    }
-}
-
-impl From<Abs> for Rel<Length> {
-    fn from(abs: Abs) -> Self {
-        Rel::from(Length::from(abs))
     }
 }
 

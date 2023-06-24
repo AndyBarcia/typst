@@ -10,7 +10,7 @@ pub fn sym() -> Module {
 }
 
 /// The list of general symbols.
-pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
+pub(crate) const SYM: &[(&str, Symbol)] = symbols! {
     // Control.
     wj: '\u{2060}',
     zwj: '\u{200D}',
@@ -36,14 +36,14 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
     // Delimiters.
     paren: [l: '(', r: ')', t: '⏜', b: '⏝'],
     brace: [l: '{', r: '}', t: '⏞', b: '⏟'],
-    bracket: [l: '[', r: ']', t: '⎴', b: '⎵'],
+    bracket: [l: '[', l.double: '⟦', r: ']', r.double: '⟧', t: '⎴', b: '⎵'],
     turtle: [l: '〔', r: '〕', t: '⏠', b: '⏡'],
     bar: [v: '|', v.double: '‖', v.triple: '⦀', v.broken: '¦', v.circle: '⦶', h: '―'],
     fence: [l: '⧘', l.double: '⧚', r: '⧙', r.double: '⧛', dotted: '⦙'],
     angle: [
         '∠',
-        l: '〈',
-        r: '〉',
+        l: '⟨',
+        r: '⟩',
         l.double: '《',
         r.double: '》',
         acute: '⦟',
@@ -64,12 +64,12 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
     // Punctuation.
     amp: ['&', inv: '⅋'],
     ast: [
-        '*',
+        op: '∗',
+        basic: '*',
         low: '⁎',
         double: '⁑',
         triple: '⁂',
         small: '﹡',
-        op: '∗',
         circle: '⊛',
         sq: '⧆',
     ],
@@ -89,8 +89,8 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
         wave.double: '〰',
     ],
     dot: [
-        '.',
         op: '⋅',
+        basic: '.',
         c: '·',
         circle: '⊙',
         circle.big: '⨀',
@@ -110,11 +110,11 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
     pilcrow: ['¶', rev: '⁋'],
     section: '§',
     semi: [';', rev: '⁏'],
-    slash: ['/', double: '⫽', triple: '⫻'],
-    dots: [h: '…', h.c: '⋯', v: '⋮', down: '⋱', up: '⋰'],
+    slash: ['/', double: '⫽', triple: '⫻', big: '\u{29f8}'],
+    dots: [h.c: '⋯', h: '…', v: '⋮', down: '⋱', up: '⋰'],
     tilde: [
-        '~',
         op: '∼',
+        basic: '~',
         eq: '≃',
         eq.not: '≄',
         eq.rev: '⋍',
@@ -191,8 +191,10 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
         circle: '⊗',
         circle.big: '⨂',
         div: '⋇',
-        l: '⋋',
-        r: '⋌',
+        three.l: '⋋',
+        three.r: '⋌',
+        l: '⋉',
+        r: '⋊',
         square: '⊠',
         triangle: '⨻',
     ],
@@ -223,6 +225,7 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
         dot: '⋗',
         double: '≫',
         eq: '≥',
+        eq.slant: '⩾',
         eq.lt: '⋛',
         eq.not: '≱',
         eqq: '≧',
@@ -234,6 +237,10 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
         small: '﹥',
         tilde: '≳',
         tilde.not: '≵',
+        tri: '⊳',
+        tri.eq: '⊵',
+        tri.eq.not: '⋭',
+        tri.not: '⋫',
         triple: '⋙',
         triple.nested: '⫸',
     ],
@@ -243,6 +250,7 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
         dot: '⋖',
         double: '≪',
         eq: '≤',
+        eq.slant: '⩽' ,
         eq.gt: '⋚',
         eq.not: '≰',
         eqq: '≦',
@@ -254,6 +262,10 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
         small: '﹤',
         tilde: '≲',
         tilde.not: '≴',
+        tri: '⊲',
+        tri.eq: '⊴',
+        tri.eq.not: '⋬',
+        tri.not: '⋪',
         triple: '⋘',
         triple.nested: '⫷',
     ],
@@ -376,6 +388,7 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
         union: '⨚',
         vol: '∰',
     ],
+    laplace: '∆',
 
     // Logic.
     forall: '∀',
@@ -385,6 +398,7 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
     not: '¬',
     and: ['∧', big: '⋀', curly: '⋏', dot: '⟑', double: '⩓'],
     or: ['∨', big: '⋁', curly: '⋎', dot: '⟇', double: '⩔'],
+    xor: ['⊕', big: '⨁'],
     models: '⊧',
     therefore: '∴',
     because: '∵',
@@ -399,6 +413,9 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
     divides: ['∣', not: '∤'],
     perp: ['⟂', circle: '⦹'],
 
+    // Algebra.
+    wreath: '≀',
+
     // Geometry.
     parallel: ['∥', circle: '⦷', not: '∦'],
 
@@ -407,7 +424,6 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
     join: ['⨝', r: '⟖', l: '⟕', l.r: '⟗'],
     degree: ['°', c: '℃', f: '℉'],
     smash: '⨳',
-    wreath: '≀',
 
     // Currency.
     bitcoin: '₿',
@@ -433,6 +449,7 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
     suit: [club: '♣', diamond: '♦', heart: '♥', spade: '♠'],
 
     // Shapes.
+    bullet: '•',
     circle: [
         stroked: '○',
         stroked.tiny: '∘',
@@ -705,10 +722,15 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
     ],
     tack: [
         r: '⊢',
+        r.not: '⊬',
         r.long: '⟝',
+        r.short: '⊦',
+        r.double: '⊨',
+        r.double.not: '⊭',
         l: '⊣',
         l.long: '⟞',
         l.short: '⫞',
+        l.double: '⫤',
         t: '⊥',
         t.big: '⟘',
         t.double: '⫫',
@@ -741,7 +763,7 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
      pi: ['π', alt: 'ϖ'],
      psi: 'ψ',
      rho: ['ρ', alt: 'ϱ'],
-     sigma: 'σ',
+     sigma: ['σ', alt: 'ς'],
      tau: 'τ',
      theta: ['θ', alt: 'ϑ'],
      upsilon: 'υ',
@@ -816,4 +838,5 @@ pub(crate) const SYM: &[(&'static str, Symbol)] = symbols! {
      kelvin: 'K',
      Re: 'ℜ',
      Im: 'ℑ',
+     dotless: [i: '𝚤', j: '𝚥'],
 };

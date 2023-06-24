@@ -34,3 +34,18 @@ With a soft #linebreak(justify: true)
 break you can force a break without #linebreak(justify: true)
 breaking justification. #linebreak(justify: false)
 Nice!
+
+---
+// Test comments at the end of a line
+First part//
+Second part
+
+// Test comments at the end of a line with pre-spacing
+First part          //
+Second part
+
+---
+// Test linebreak for East Asian languages
+ทีวีตรวจทานนอร์ทแฟรีเลคเชอร์โกลด์อัลบัมเชอร์รี่เย้วสโตร์กฤษณ์เคลมเยอบีร่าพ่อค้าบลูเบอร์รี่สหัสวรรษโฮปแคนูโยโย่จูนสตรอว์เบอร์รีซื่อบื้อเยนแบ็กโฮเป็นไงโดนัททอมสเตริโอแคนูวิทย์แดรี่โดนัทวิทย์แอปพริคอทเซอร์ไพรส์ไฮบริดกิฟท์อินเตอร์โซนเซอร์วิสเทียมทานโคโยตี้ม็อบเที่ยงคืนบุญคุณ
+
+

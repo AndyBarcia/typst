@@ -1,13 +1,14 @@
 //! Finished documents.
 
-use std::fmt::{self, Debug, Formatter, Write};
+use std::fmt::{self, Debug, Formatter};
 use std::num::NonZeroUsize;
+use std::ops::Range;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use ecow::EcoString;
 
-use crate::eval::{cast_from_value, cast_to_value, dict, Dict, Value};
+use crate::eval::{cast, dict, Dict, Value};
 use crate::font::Font;
 use crate::geom::{
     self, rounded_rect, Abs, Align, Axes, Color, Corners, Dir, Em, Geometry, Length,
@@ -113,23 +114,6 @@ impl Frame {
     /// relative to the top-left of the frame.
     pub fn items(&self) -> std::slice::Iter<'_, (Point, FrameItem)> {
         self.items.iter()
-    }
-
-    /// Approximately recover the text inside of the frame and its children.
-    pub fn text(&self) -> EcoString {
-        let mut text = EcoString::new();
-        for (_, item) in self.items() {
-            match item {
-                FrameItem::Text(item) => {
-                    for glyph in &item.glyphs {
-                        text.push(glyph.c);
-                    }
-                }
-                FrameItem::Group(group) => text.push_str(&group.frame.text()),
-                _ => {}
-            }
-        }
-        text
     }
 }
 
@@ -273,13 +257,24 @@ impl Frame {
     /// Attach the metadata from this style chain to the frame.
     pub fn meta(&mut self, styles: StyleChain, force: bool) {
         if force || !self.is_empty() {
-            for meta in MetaElem::data_in(styles) {
-                if matches!(meta, Meta::Hide) {
-                    self.clear();
-                    break;
-                }
+            self.meta_iter(MetaElem::data_in(styles));
+        }
+    }
+
+    /// Attach metadata from an iterator.
+    pub fn meta_iter(&mut self, iter: impl IntoIterator<Item = Meta>) {
+        let mut hide = false;
+        for meta in iter {
+            if matches!(meta, Meta::Hide) {
+                hide = true;
+            } else {
                 self.prepend(Point::zero(), FrameItem::Meta(meta, self.size));
             }
+        }
+        if hide {
+            Arc::make_mut(&mut self.items).retain(|(_, item)| {
+                matches!(item, FrameItem::Group(_) | FrameItem::Meta(Meta::Elem(_), _))
+            });
         }
     }
 
@@ -359,6 +354,7 @@ impl Frame {
                 Geometry::Line(Point::with_x(self.size.x)).stroked(Stroke {
                     paint: Color::RED.into(),
                     thickness: Abs::pt(1.0),
+                    ..Stroke::default()
                 }),
                 Span::detached(),
             ),
@@ -386,6 +382,7 @@ impl Frame {
                 Geometry::Line(Point::with_x(self.size.x)).stroked(Stroke {
                     paint: Color::GREEN.into(),
                     thickness: Abs::pt(1.0),
+                    ..Stroke::default()
                 }),
                 Span::detached(),
             ),
@@ -469,6 +466,8 @@ pub struct TextItem {
     pub fill: Paint,
     /// The natural language of the text.
     pub lang: Lang,
+    /// The item's plain text.
+    pub text: EcoString,
     /// The glyphs.
     pub glyphs: Vec<Glyph>,
 }
@@ -482,19 +481,14 @@ impl TextItem {
 
 impl Debug for TextItem {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        // This is only a rough approxmiation of the source text.
-        f.write_str("Text(\"")?;
-        for glyph in &self.glyphs {
-            for c in glyph.c.escape_debug() {
-                f.write_char(c)?;
-            }
-        }
-        f.write_str("\")")
+        f.write_str("Text(")?;
+        self.text.fmt(f)?;
+        f.write_str(")")
     }
 }
 
 /// A glyph in a run of shaped text.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct Glyph {
     /// The glyph's index in the font.
     pub id: u16,
@@ -502,12 +496,17 @@ pub struct Glyph {
     pub x_advance: Em,
     /// The horizontal offset of the glyph.
     pub x_offset: Em,
-    /// The first character of the glyph's cluster.
-    pub c: char,
+    /// The range of the glyph in its item's text.
+    pub range: Range<u16>,
     /// The source code location of the text.
-    pub span: Span,
-    /// The offset within the spanned text.
-    pub offset: u16,
+    pub span: (Span, u16),
+}
+
+impl Glyph {
+    /// The range of the glyph in its item's text.
+    pub fn range(&self) -> Range<usize> {
+        usize::from(self.range.start)..usize::from(self.range.end)
+    }
 }
 
 /// An identifier for a natural language.
@@ -515,8 +514,29 @@ pub struct Glyph {
 pub struct Lang([u8; 3], u8);
 
 impl Lang {
+    pub const ALBANIAN: Self = Self(*b"sq ", 2);
+    pub const ARABIC: Self = Self(*b"ar ", 2);
+    pub const BOKMÅL: Self = Self(*b"nb ", 2);
+    pub const CHINESE: Self = Self(*b"zh ", 2);
+    pub const CZECH: Self = Self(*b"cs ", 2);
+    pub const DANISH: Self = Self(*b"da ", 2);
+    pub const DUTCH: Self = Self(*b"nl ", 2);
     pub const ENGLISH: Self = Self(*b"en ", 2);
+    pub const FILIPINO: Self = Self(*b"tl ", 2);
+    pub const FRENCH: Self = Self(*b"fr ", 2);
     pub const GERMAN: Self = Self(*b"de ", 2);
+    pub const ITALIAN: Self = Self(*b"it ", 2);
+    pub const JAPANESE: Self = Self(*b"ja ", 2);
+    pub const NYNORSK: Self = Self(*b"nn ", 2);
+    pub const POLISH: Self = Self(*b"pl ", 2);
+    pub const PORTUGUESE: Self = Self(*b"pt ", 2);
+    pub const RUSSIAN: Self = Self(*b"ru ", 2);
+    pub const SLOVENIAN: Self = Self(*b"sl ", 2);
+    pub const SPANISH: Self = Self(*b"es ", 2);
+    pub const SWEDISH: Self = Self(*b"sv ", 2);
+    pub const TURKISH: Self = Self(*b"tr ", 2);
+    pub const UKRAINIAN: Self = Self(*b"ua ", 2);
+    pub const VIETNAMESE: Self = Self(*b"vi ", 2);
 
     /// Return the language code as an all lowercase string slice.
     pub fn as_str(&self) -> &str {
@@ -550,13 +570,10 @@ impl FromStr for Lang {
     }
 }
 
-cast_from_value! {
+cast! {
     Lang,
+    self => self.as_str().into_value(),
     string: EcoString => Self::from_str(&string)?,
-}
-
-cast_to_value! {
-    v: Lang => v.as_str().into()
 }
 
 /// An identifier for a region somewhere in the world.
@@ -567,6 +584,12 @@ impl Region {
     /// Return the region code as an all uppercase string slice.
     pub fn as_str(&self) -> &str {
         std::str::from_utf8(&self.0).unwrap_or_default()
+    }
+}
+
+impl PartialEq<&str> for Region {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
     }
 }
 
@@ -585,31 +608,41 @@ impl FromStr for Region {
     }
 }
 
-cast_from_value! {
+cast! {
     Region,
+    self => self.as_str().into_value(),
     string: EcoString => Self::from_str(&string)?,
 }
 
-cast_to_value! {
-    v: Region => v.as_str().into()
-}
-
 /// Meta information that isn't visible or renderable.
-#[derive(Debug, Clone, PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 pub enum Meta {
     /// An internal or external link to a destination.
     Link(Destination),
     /// An identifiable element that produces something within the area this
     /// metadata is attached to.
     Elem(Content),
+    /// The numbering of the current page.
+    PageNumbering(Value),
     /// Indicates that content should be hidden. This variant doesn't appear
     /// in the final frames as it is removed alongside the content that should
     /// be hidden.
     Hide,
 }
 
-cast_from_value! {
-    Meta: "meta",
+cast! {
+    type Meta: "meta",
+}
+
+impl Debug for Meta {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Self::Link(dest) => write!(f, "Link({dest:?})"),
+            Self::Elem(content) => write!(f, "Elem({:?})", content.func()),
+            Self::PageNumbering(value) => write!(f, "PageNumbering({value:?})"),
+            Self::Hide => f.pad("Hide"),
+        }
+    }
 }
 
 /// A link destination.
@@ -623,19 +656,16 @@ pub enum Destination {
     Location(Location),
 }
 
-cast_from_value! {
+cast! {
     Destination,
+    self => match self {
+        Self::Url(v) => v.into_value(),
+        Self::Position(v) => v.into_value(),
+        Self::Location(v) => v.into_value(),
+    },
     v: EcoString => Self::Url(v),
     v: Position => Self::Position(v),
     v: Location => Self::Location(v),
-}
-
-cast_to_value! {
-    v: Destination => match v {
-        Destination::Url(v) => v.into(),
-        Destination::Position(v) => v.into(),
-        Destination::Location(v) => v.into(),
-    }
 }
 
 /// A physical position in a document.
@@ -647,8 +677,9 @@ pub struct Position {
     pub point: Point,
 }
 
-cast_from_value! {
+cast! {
     Position,
+    self => Value::Dict(self.into()),
     mut dict: Dict => {
         let page = dict.take("page")?.cast()?;
         let x: Length = dict.take("x")?.cast()?;
@@ -658,10 +689,31 @@ cast_from_value! {
     },
 }
 
-cast_to_value! {
-    v: Position => Value::Dict(dict! {
-        "page" => Value::Int(v.page.get() as i64),
-        "x" => Value::Length(v.point.x.into()),
-        "y" => Value::Length(v.point.y.into()),
-    })
+impl From<Position> for Dict {
+    fn from(pos: Position) -> Self {
+        dict! {
+            "page" => pos.page,
+            "x" => pos.point.x,
+            "y" => pos.point.y,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::option_eq;
+
+    #[test]
+    fn test_region_option_eq() {
+        let region = Some(Region([b'U', b'S']));
+        assert!(option_eq(region, "US"));
+        assert!(!option_eq(region, "AB"));
+    }
+
+    #[test]
+    fn test_document_is_send() {
+        fn ensure_send<T: Send>() {}
+        ensure_send::<Document>();
+    }
 }

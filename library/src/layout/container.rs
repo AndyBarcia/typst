@@ -1,3 +1,5 @@
+use typst::eval::AutoValue;
+
 use super::VElem;
 use crate::layout::Spacing;
 use crate::prelude::*;
@@ -9,7 +11,7 @@ use crate::prelude::*;
 /// elements into a paragraph. Boxes take the size of their contents by default
 /// but can also be sized explicitly.
 ///
-/// ## Example
+/// ## Example { #example }
 /// ```example
 /// Refer to the docs
 /// #box(
@@ -84,9 +86,14 @@ pub struct BoxElem {
     ///   outset: (y: 3pt),
     ///   radius: 2pt,
     /// )[rectangle].
+    /// ```
     #[resolve]
     #[fold]
     pub outset: Sides<Option<Rel<Length>>>,
+
+    /// Whether to clip the content inside the box.
+    #[default(false)]
+    pub clip: bool,
 
     /// The contents of the box.
     #[positional]
@@ -94,6 +101,7 @@ pub struct BoxElem {
 }
 
 impl Layout for BoxElem {
+    #[tracing::instrument(name = "BoxElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -127,10 +135,18 @@ impl Layout for BoxElem {
         let pod = Regions::one(size, expand);
         let mut frame = body.layout(vt, styles, pod)?.into_frame();
 
+        // Enforce correct size.
+        *frame.size_mut() = expand.select(size, frame.size());
+
         // Apply baseline shift.
         let shift = self.baseline(styles).relative_to(frame.height());
         if !shift.is_zero() {
             frame.set_baseline(frame.baseline() - shift);
+        }
+
+        // Clip the contents
+        if self.clip(styles) {
+            frame.clip();
         }
 
         // Prepare fill and stroke.
@@ -153,10 +169,10 @@ impl Layout for BoxElem {
 
 /// A block-level container.
 ///
-/// Such a container can be used to separate content, size it and give it a
+/// Such a container can be used to separate content, size it, and give it a
 /// background or border.
 ///
-/// ## Examples
+/// ## Examples { #examples }
 /// With a block, you can give a background to content while still allowing it
 /// to break across multiple pages.
 /// ```example
@@ -198,9 +214,9 @@ pub struct BlockElem {
     /// ```
     pub width: Smart<Rel<Length>>,
 
-    /// The block's height. When the height is larger than the remaining space on
-    /// a page and [`breakable`]($func/block.breakable) is `{true}`, the block
-    /// will continue on the next page with the remaining height.
+    /// The block's height. When the height is larger than the remaining space
+    /// on a page and [`breakable`]($func/block.breakable) is `{true}`, the
+    /// block will continue on the next page with the remaining height.
     ///
     /// ```example
     /// #set page(height: 80pt)
@@ -215,7 +231,6 @@ pub struct BlockElem {
 
     /// Whether the block can be broken and continue on the next page.
     ///
-    /// Defaults to `{true}`.
     /// ```example
     /// #set page(height: 80pt)
     /// The following block will
@@ -268,13 +283,16 @@ pub struct BlockElem {
     /// A second paragraph.
     /// ```
     #[external]
+    #[default(Em::new(1.2).into())]
     pub spacing: Spacing,
 
     /// The spacing between this block and its predecessor. Takes precedence
     /// over `spacing`. Can be used in combination with a show rule to adjust
     /// the spacing around arbitrary block-level elements.
-    ///
-    /// The default value is `{1.2em}`.
+    #[external]
+    #[default(Em::new(1.2).into())]
+    pub above: Spacing,
+    #[internal]
     #[parse(
         let spacing = args.named("spacing")?;
         args.named("above")?
@@ -286,8 +304,10 @@ pub struct BlockElem {
 
     /// The spacing between this block and its successor. Takes precedence
     /// over `spacing`.
-    ///
-    /// The default value is `{1.2em}`.
+    #[external]
+    #[default(Em::new(1.2).into())]
+    pub below: Spacing,
+    #[internal]
     #[parse(
         args.named("below")?
             .map(VElem::block_around)
@@ -295,6 +315,10 @@ pub struct BlockElem {
     )]
     #[default(VElem::block_spacing(Em::new(1.2).into()))]
     pub below: VElem,
+
+    /// Whether to clip the content inside the block.
+    #[default(false)]
+    pub clip: bool,
 
     /// The contents of the block.
     #[positional]
@@ -309,6 +333,7 @@ pub struct BlockElem {
 }
 
 impl Layout for BlockElem {
+    #[tracing::instrument(name = "BlockElem::layout", skip_all)]
     fn layout(
         &self,
         vt: &mut Vt,
@@ -345,6 +370,10 @@ impl Layout for BlockElem {
             pod.size.x = size.x;
             pod.expand = expand;
 
+            if expand.y {
+                pod.full = size.y;
+            }
+
             // Generate backlog for fixed height.
             let mut heights = vec![];
             if sizing.y.is_custom() {
@@ -358,16 +387,34 @@ impl Layout for BlockElem {
                     }
                 }
 
+                if let Some(last) = heights.last_mut() {
+                    *last += remaining;
+                }
+
                 pod.size.y = heights[0];
                 pod.backlog = &heights[1..];
                 pod.last = None;
             }
 
-            body.layout(vt, styles, pod)?.into_frames()
+            let mut frames = body.layout(vt, styles, pod)?.into_frames();
+            for (frame, &height) in frames.iter_mut().zip(&heights) {
+                *frame.size_mut() =
+                    expand.select(Size::new(size.x, height), frame.size());
+            }
+            frames
         } else {
             let pod = Regions::one(size, expand);
-            body.layout(vt, styles, pod)?.into_frames()
+            let mut frames = body.layout(vt, styles, pod)?.into_frames();
+            *frames[0].size_mut() = expand.select(size, frames[0].size());
+            frames
         };
+
+        // Clip the contents
+        if self.clip(styles) {
+            for frame in frames.iter_mut() {
+                frame.clip();
+            }
+        }
 
         // Prepare fill and stroke.
         let fill = self.fill(styles);
@@ -383,7 +430,13 @@ impl Layout for BlockElem {
             let outset = self.outset(styles);
             let radius = self.radius(styles);
             for frame in frames.iter_mut().skip(skip as usize) {
-                frame.fill_and_stroke(fill, stroke, outset, radius, self.span());
+                frame.fill_and_stroke(
+                    fill.clone(),
+                    stroke.clone(),
+                    outset,
+                    radius,
+                    self.span(),
+                );
             }
         }
 
@@ -431,17 +484,14 @@ impl<T: Into<Spacing>> From<T> for Sizing {
     }
 }
 
-cast_from_value! {
+cast! {
     Sizing,
-    _: Smart<Never> => Self::Auto,
+    self => match self {
+        Self::Auto => Value::Auto,
+        Self::Rel(rel) => rel.into_value(),
+        Self::Fr(fr) => fr.into_value(),
+    },
+    _: AutoValue => Self::Auto,
     v: Rel<Length> => Self::Rel(v),
     v: Fr => Self::Fr(v),
-}
-
-cast_to_value! {
-    v: Sizing => match v {
-        Sizing::Auto => Value::Auto,
-        Sizing::Rel(rel) => Value::Relative(rel),
-        Sizing::Fr(fr) => Value::Fraction(fr),
-    }
 }

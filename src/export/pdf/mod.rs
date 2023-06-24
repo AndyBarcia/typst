@@ -6,14 +6,14 @@ mod outline;
 mod page;
 
 use std::cmp::Eq;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 
+use ecow::EcoString;
 use pdf_writer::types::Direction;
 use pdf_writer::{Finish, Name, PdfWriter, Ref, TextStr};
 use xmp_writer::{LangId, RenditionClass, XmpWriter};
 
-use self::outline::HeadingNode;
 use self::page::Page;
 use crate::doc::{Document, Lang};
 use crate::font::Font;
@@ -24,6 +24,7 @@ use crate::model::Introspector;
 /// Export a document into a PDF file.
 ///
 /// Returns the raw bytes making up the PDF file.
+#[tracing::instrument(skip_all)]
 pub fn pdf(document: &Document) -> Vec<u8> {
     let mut ctx = PdfContext::new(document);
     page::construct_pages(&mut ctx, &document.pages);
@@ -52,9 +53,14 @@ pub struct PdfContext<'a> {
     page_refs: Vec<Ref>,
     font_map: Remapper<Font>,
     image_map: Remapper<Image>,
-    glyph_sets: HashMap<Font, HashSet<u16>>,
+    /// For each font a mapping from used glyphs to their text representation.
+    /// May contain multiple chars in case of ligatures or similar things. The
+    /// same glyph can have a different text representation within one document,
+    /// then we just save the first one. The resulting strings are used for the
+    /// PDF's /ToUnicode map for glyphs that don't have an entry in the font's
+    /// cmap. This is important for copy-paste and searching.
+    glyph_sets: HashMap<Font, BTreeMap<u16, EcoString>>,
     languages: HashMap<Lang, usize>,
-    heading_tree: Vec<HeadingNode>,
 }
 
 impl<'a> PdfContext<'a> {
@@ -76,36 +82,13 @@ impl<'a> PdfContext<'a> {
             image_map: Remapper::new(),
             glyph_sets: HashMap::new(),
             languages: HashMap::new(),
-            heading_tree: vec![],
         }
     }
 }
 
 /// Write the document catalog.
+#[tracing::instrument(skip_all)]
 fn write_catalog(ctx: &mut PdfContext) {
-    // Build the outline tree.
-    let outline_root_id = (!ctx.heading_tree.is_empty()).then(|| ctx.alloc.bump());
-    let outline_start_ref = ctx.alloc;
-    let len = ctx.heading_tree.len();
-    let mut prev_ref = None;
-
-    for (i, node) in std::mem::take(&mut ctx.heading_tree).iter().enumerate() {
-        prev_ref = Some(outline::write_outline_item(
-            ctx,
-            node,
-            outline_root_id.unwrap(),
-            prev_ref,
-            i + 1 == len,
-        ));
-    }
-
-    if let Some(outline_root_id) = outline_root_id {
-        let mut outline_root = ctx.writer.outline(outline_root_id);
-        outline_root.first(outline_start_ref);
-        outline_root.last(Ref::new(ctx.alloc.get() - 1));
-        outline_root.count(ctx.heading_tree.len() as i32);
-    }
-
     let lang = ctx
         .languages
         .iter()
@@ -117,6 +100,9 @@ fn write_catalog(ctx: &mut PdfContext) {
     } else {
         Direction::L2R
     };
+
+    // Write the outline tree.
+    let outline_root_id = outline::write_outline(ctx);
 
     // Write the document information.
     let mut info = ctx.writer.document_info(ctx.alloc.bump());
@@ -163,6 +149,7 @@ fn write_catalog(ctx: &mut PdfContext) {
 }
 
 /// Compress data with the DEFLATE algorithm.
+#[tracing::instrument(skip_all)]
 fn deflate(data: &[u8]) -> Vec<u8> {
     const COMPRESSION_LEVEL: u8 = 6;
     miniz_oxide::deflate::compress_to_vec_zlib(data, COMPRESSION_LEVEL)

@@ -122,7 +122,7 @@ fn complete_markup(ctx: &mut CompletionContext) -> bool {
     }
 
     // Directly after a raw block.
-    let mut s = Scanner::new(&ctx.text);
+    let mut s = Scanner::new(ctx.text);
     s.jump(ctx.leaf.offset());
     if s.eat_if("```") {
         s.eat_while('`');
@@ -317,6 +317,8 @@ fn complete_field_accesses(ctx: &mut CompletionContext) -> bool {
         if ctx.leaf.range().end == ctx.cursor;
         if let Some(prev) = ctx.leaf.prev_sibling();
         if prev.is::<ast::Expr>();
+        if prev.parent_kind() != Some(SyntaxKind::Markup) ||
+           prev.prev_sibling_kind() == Some(SyntaxKind::Hashtag);
         if let Some(value) = analyze_expr(ctx.world, &prev).into_iter().next();
         then {
             ctx.from = ctx.cursor;
@@ -384,6 +386,14 @@ fn field_access_completions(ctx: &mut CompletionContext, value: &Value) {
         Value::Module(module) => {
             for (name, value) in module.scope().iter() {
                 ctx.value_completion(Some(name.clone()), value, true, None);
+            }
+        }
+        Value::Func(func) => {
+            if let Some(info) = func.info() {
+                // Consider all names from the function's scope.
+                for (name, value) in info.scope.iter() {
+                    ctx.value_completion(Some(name.clone()), value, true, None);
+                }
             }
         }
         _ => {}
@@ -651,7 +661,7 @@ fn param_completions(
                 kind: CompletionKind::Param,
                 label: param.name.into(),
                 apply: Some(eco_format!("{}: ${{}}", param.name)),
-                detail: Some(plain_docs_sentence(param.docs).into()),
+                detail: Some(plain_docs_sentence(param.docs)),
             });
         }
 
@@ -699,6 +709,7 @@ fn complete_code(ctx: &mut CompletionContext) -> bool {
             | Some(SyntaxKind::Math)
             | Some(SyntaxKind::MathFrac)
             | Some(SyntaxKind::MathAttach)
+            | Some(SyntaxKind::MathRoot)
     ) {
         return false;
     }
@@ -896,8 +907,8 @@ impl<'a> CompletionContext<'a> {
             frames,
             library,
             source,
-            global: &library.global.scope(),
-            math: &library.math.scope(),
+            global: library.global.scope(),
+            math: library.math.scope(),
             text,
             before: &text[..cursor],
             after: &text[cursor..],
@@ -1002,9 +1013,7 @@ impl<'a> CompletionContext<'a> {
 
         let detail = docs.map(Into::into).or_else(|| match value {
             Value::Symbol(_) => None,
-            Value::Func(func) => {
-                func.info().map(|info| plain_docs_sentence(info.docs).into())
-            }
+            Value::Func(func) => func.info().map(|info| plain_docs_sentence(info.docs)),
             v => Some(v.repr().into()),
         });
 
@@ -1096,7 +1105,9 @@ impl<'a> CompletionContext<'a> {
             let mut sibling = Some(node.clone());
             while let Some(node) = &sibling {
                 if let Some(v) = node.cast::<ast::LetBinding>() {
-                    defined.insert(v.binding().take());
+                    for ident in v.kind().idents() {
+                        defined.insert(ident.take());
+                    }
                 }
                 sibling = node.prev_sibling();
             }
@@ -1105,10 +1116,9 @@ impl<'a> CompletionContext<'a> {
                 if let Some(v) = parent.cast::<ast::ForLoop>() {
                     if node.prev_sibling_kind() != Some(SyntaxKind::In) {
                         let pattern = v.pattern();
-                        if let Some(key) = pattern.key() {
-                            defined.insert(key.take());
+                        for ident in pattern.idents() {
+                            defined.insert(ident.take());
                         }
-                        defined.insert(pattern.value().take());
                     }
                 }
 
